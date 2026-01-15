@@ -1,0 +1,1 @@
+Copyright (c) 2026 Emerson Hendry. All rights reserved. No part of this source code or associated assets may be reproduced, distributed, or transmitted in any form without the prior written permission of the author.
