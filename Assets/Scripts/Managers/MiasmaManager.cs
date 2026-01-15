@@ -11,13 +11,13 @@ public class MiasmaManager : MonoBehaviour
     public static MiasmaManager Instance { get; private set; }
 
     [Header("Tile Settings")]
-    public float tileSize = 2f;  // World units per tile
-    public int viewPadding = 6;  // Extra tiles beyond viewport
+    public float tileSize = 0.5f;  // World units per tile (smaller = finer detail)
+    public int viewPadding = 10;   // Extra tiles beyond viewport
 
     [Header("Regrowth")]
     public float regrowDelay = 1.5f;    // Seconds before regrowth can occur
     public float regrowChance = 0.15f;  // Chance per frame per eligible tile
-    public int regrowBudget = 128;      // Max tiles to regrow per frame
+    public int regrowBudget = 512;      // Max tiles to regrow per frame
 
     // Cleared tiles: key = tile coord, value = time cleared
     private Dictionary<Vector2Int, float> clearedTiles = new Dictionary<Vector2Int, float>();

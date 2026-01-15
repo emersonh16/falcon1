@@ -178,13 +178,12 @@ public class MiasmaRenderer : MonoBehaviour
 
     void CreateMaterial()
     {
-        // Use URP Unlit shader which supports GPU instancing
-        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
-        if (shader == null) shader = Shader.Find("Unlit/Color");
-        if (shader == null) shader = Shader.Find("Sprites/Default");
+        // Use custom instanced shader
+        Shader shader = Shader.Find("Custom/UnlitInstanced");
+        if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
         
         miasmaMaterial = new Material(shader);
-        miasmaMaterial.color = miasmaColor;
+        miasmaMaterial.SetColor("_Color", miasmaColor);
         miasmaMaterial.enableInstancing = true;
     }
 }
