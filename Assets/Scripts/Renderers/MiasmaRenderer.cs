@@ -17,10 +17,15 @@ public class MiasmaRenderer : MonoBehaviour
     
     [Header("Sheet Size")]
     [Tooltip("Multiplier for viewport size. 1.0 = exact viewport, 1.5 = 50% larger")]
-    public float sizeMultiplier = 1.2f;  // Make sheet larger than viewport (1.0 = exact fit)
+    public float sizeMultiplier = 2.0f;  // Make sheet much larger to prevent edge shimmering
 
     [Header("Performance")]
     public int maxTilesPerBatch = 1023;  // Unity limit for DrawMeshInstanced
+
+    [Header("Smoothing")]
+    [Tooltip("How fast the miasma sheet follows the player (higher = faster, 0 = instant)")]
+    [Range(0f, 20f)]
+    public float smoothingSpeed = 8f;  // Smooth interpolation speed
 
     private Mesh tileMesh;
     private Material miasmaMaterial;
@@ -30,7 +35,9 @@ public class MiasmaRenderer : MonoBehaviour
 
     private int lastMinX, lastMaxX, lastMinZ, lastMaxZ;
     private Vector3 lastPlayerPos;
+    private Vector3 smoothedSheetCenter;  // Smoothed position for sheet center
     private bool needsRebuild = true;
+    private bool isInitialized = false;
 
     void Start()
     {
@@ -76,6 +83,24 @@ public class MiasmaRenderer : MonoBehaviour
     {
         if (MiasmaManager.Instance == null || player == null) return;
 
+        // Initialize smoothed position on first frame
+        if (!isInitialized)
+        {
+            smoothedSheetCenter = new Vector3(player.position.x, renderHeight, player.position.z);
+            isInitialized = true;
+        }
+
+        // Smooth the sheet center position towards player position
+        Vector3 targetCenter = new Vector3(player.position.x, renderHeight, player.position.z);
+        if (smoothingSpeed > 0f)
+        {
+            smoothedSheetCenter = Vector3.Lerp(smoothedSheetCenter, targetCenter, smoothingSpeed * Time.deltaTime);
+        }
+        else
+        {
+            smoothedSheetCenter = targetCenter;  // Instant if smoothing disabled
+        }
+
         // Player-centric: always update bounds centered on player
         float viewW = mainCamera.orthographicSize * 2f * mainCamera.aspect;
         float viewH = mainCamera.orthographicSize * 2f;
@@ -84,11 +109,18 @@ public class MiasmaRenderer : MonoBehaviour
         MiasmaManager.Instance.GetVisibleBounds(player.position, viewW, viewH,
             out minX, out maxX, out minZ, out maxZ);
 
-        // Rebuild if bounds changed OR player moved significantly
+        // Rebuild if bounds changed OR player moved significantly OR smoothed position changed
+        // Use larger threshold to reduce rebuild frequency and prevent shimmering
         bool boundsChanged = (minX != lastMinX || maxX != lastMaxX || minZ != lastMinZ || maxZ != lastMaxZ);
-        bool playerMoved = Vector3.Distance(player.position, lastPlayerPos) > MiasmaManager.Instance.tileSize * 0.5f;
+        float rebuildThreshold = MiasmaManager.Instance.tileSize * 2.0f;  // Rebuild only after moving 2 full tiles
+        bool playerMoved = Vector3.Distance(player.position, lastPlayerPos) > rebuildThreshold;
+        
+        // Rebuild if smoothed position changed significantly (for smooth movement)
+        // Use smaller threshold for smooth updates
+        float smoothUpdateThreshold = MiasmaManager.Instance.tileSize * 0.1f;  // Update for small movements
+        bool smoothedMoved = Vector3.Distance(smoothedSheetCenter, new Vector3(player.position.x, renderHeight, player.position.z)) > smoothUpdateThreshold;
 
-        if (boundsChanged || playerMoved || needsRebuild)
+        if (boundsChanged || playerMoved || smoothedMoved || needsRebuild)
         {
             lastMinX = minX; lastMaxX = maxX;
             lastMinZ = minZ; lastMaxZ = maxZ;
@@ -124,6 +156,12 @@ public class MiasmaRenderer : MonoBehaviour
         // cos(30°) ≈ 0.866, so we need to expand by ~1.155 to compensate
         float isometricCompensation = 2.0f;  // Extra padding for isometric view
         float sheetH = viewH * Mathf.Max(1.0f, sizeMultiplier) * isometricCompensation;
+        
+        // Ensure sheet is large enough to prevent edge shimmering when moving
+        // Add extra padding beyond viewport
+        float extraPadding = Mathf.Max(viewW, viewH) * 0.5f;  // 50% extra padding
+        sheetW += extraPadding;
+        sheetH += extraPadding;
 
         // Get camera's forward and right vectors (projected to XZ plane)
         Vector3 camForward = mainCamera.transform.forward;
@@ -135,8 +173,8 @@ public class MiasmaRenderer : MonoBehaviour
         int tilesW = Mathf.CeilToInt(sheetW / tileSize) + 1;  // +1 to ensure coverage
         int tilesH = Mathf.CeilToInt(sheetH / tileSize) + 1;
         
-        Vector3 playerPos = player.position;
-        Vector3 sheetCenter = new Vector3(playerPos.x, renderHeight, playerPos.z);
+        // Use smoothed sheet center for smooth movement
+        Vector3 sheetCenter = smoothedSheetCenter;
         Vector3 sheetBottomLeft = sheetCenter - camRight * (sheetW * 0.5f) - camForward * (sheetH * 0.5f);
 
         // Generate tiles in camera-aligned grid - tiles should overlap slightly to avoid gaps
@@ -155,8 +193,8 @@ public class MiasmaRenderer : MonoBehaviour
                 if (clearedSet.Contains(tile)) continue;
 
                 // Create matrix - tiles overlap to eliminate visible gaps
-                // 5% overlap should eliminate gaps completely
-                float scale = tileSize * 1.5f;
+                // Larger overlap for smoother appearance and to prevent edge shimmering
+                float scale = tileSize * 1.6f;  // Increased from 1.5f for better coverage
                 Matrix4x4 matrix = Matrix4x4.TRS(worldPos, Quaternion.identity, new Vector3(scale, 1f, scale));
                 visibleMatrices.Add(matrix);
             }
