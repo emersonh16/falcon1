@@ -9,8 +9,8 @@ public class GridGround : MonoBehaviour
     [Header("Grid Settings")]
     public int gridSize = 50;           // Number of cells in each direction
     public float cellSize = 2f;         // Size of each cell in world units
-    public Color groundColor = new Color(0.2f, 0.2f, 0.2f);  // Dark gray
-    public Color lineColor = new Color(0.4f, 0.4f, 0.4f);    // Lighter gray
+    public Color groundColor = new Color(0.2f, 0.6f, 0.2f);  // Green
+    public Color lineColor = new Color(0.3f, 0.7f, 0.3f);     // Lighter green
     public float lineWidth = 0.05f;
 
     void Start()
@@ -20,24 +20,65 @@ public class GridGround : MonoBehaviour
 
     void CreateGrid()
     {
-        // Create ground quad
-        GameObject ground = GameObject.CreatePrimitive(PrimitiveType.Quad);
-        ground.name = "GroundPlane";
-        ground.transform.parent = transform;
-        ground.transform.localPosition = Vector3.zero;
-        ground.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+        // Check if ground already exists (from previous run or scene)
+        Transform existingGround = transform.Find("GroundPlane");
+        GameObject ground;
+        
+        if (existingGround != null)
+        {
+            ground = existingGround.gameObject;
+        }
+        else
+        {
+            // Create ground quad
+            ground = GameObject.CreatePrimitive(PrimitiveType.Quad);
+            ground.name = "GroundPlane";
+            ground.transform.parent = transform;
+            ground.transform.localPosition = Vector3.zero;
+            ground.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+        }
         
         float totalSize = gridSize * cellSize;
         ground.transform.localScale = new Vector3(totalSize, totalSize, 1f);
         
-        // Set ground material
+        // Update ground material color (always update to current color)
         Renderer groundRenderer = ground.GetComponent<Renderer>();
-        Material groundMat = new Material(Shader.Find("Sprites/Default"));
-        groundMat.color = groundColor;
-        groundRenderer.material = groundMat;
+        if (groundRenderer.material != null)
+        {
+            groundRenderer.material.color = groundColor;
+        }
+        else
+        {
+            Material groundMat = new Material(Shader.Find("Sprites/Default"));
+            groundMat.color = groundColor;
+            groundRenderer.material = groundMat;
+        }
 
-        // Create grid lines
-        CreateGridLines(totalSize);
+        // Only create grid lines if they don't exist
+        if (transform.Find("GridLines") == null)
+        {
+            CreateGridLines(totalSize);
+        }
+        else
+        {
+            // Update existing grid line colors
+            UpdateGridLineColors();
+        }
+    }
+
+    void UpdateGridLineColors()
+    {
+        Transform gridLines = transform.Find("GridLines");
+        if (gridLines == null) return;
+
+        foreach (Transform line in gridLines)
+        {
+            LineRenderer lr = line.GetComponent<LineRenderer>();
+            if (lr != null && lr.material != null)
+            {
+                lr.material.color = lineColor;
+            }
+        }
     }
 
     void CreateGridLines(float totalSize)

@@ -208,7 +208,8 @@ public class MiasmaManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Clear miasma in a cone shape (sector)
+    /// Clear miasma in a cone shape (sector/pie slice)
+    /// Matches the visual: pie slice from origin to length at given angle
     /// </summary>
     public int ClearCone(Vector3 origin, Vector3 direction, float length, float halfAngleDeg)
     {
@@ -217,23 +218,59 @@ public class MiasmaManager : MonoBehaviour
         direction.y = 0f;  // Keep on XZ plane
         direction.Normalize();
 
-        // Sample along the cone length
-        float step = tileSize * 0.5f;  // Sample every half tile
-        int steps = Mathf.CeilToInt(length / step);
+        // Calculate cone bounds in tile space
+        int tileRadius = Mathf.CeilToInt(length / tileSize) + 1;
+        Vector2Int originTile = WorldToTile(origin);
+        float lengthSq = length * length;
 
-        for (int i = 1; i <= steps; i++)
+        // Check all tiles in a square around origin
+        for (int dx = -tileRadius; dx <= tileRadius; dx++)
         {
-            float dist = i * step;
-            if (dist > length) dist = length;
-
-            Vector3 center = origin + direction * dist;
-            float radius = Mathf.Max(tileSize * 0.5f, Mathf.Tan(halfAngle) * dist);
-
-            cleared += ClearArea(center, radius);
+            for (int dz = -tileRadius; dz <= tileRadius; dz++)
+            {
+                Vector2Int tile = new Vector2Int(originTile.x + dx, originTile.y + dz);
+                Vector3 tileWorld = TileToWorld(tile);
+                
+                // Vector from origin to tile center
+                Vector3 toTile = tileWorld - origin;
+                toTile.y = 0f;
+                
+                float distSq = toTile.sqrMagnitude;
+                
+                // Check if within length
+                if (distSq > lengthSq) continue;
+                
+                // Check if within angle (cone)
+                if (toTile.magnitude < 0.001f)
+                {
+                    // At origin, always clear
+                    if (!clearedTiles.ContainsKey(tile))
+                    {
+                        clearedTiles[tile] = Time.time;
+                        cleared++;
+                        UpdateFrontier(tile);
+                    }
+                    continue;
+                }
+                
+                toTile.Normalize();
+                
+                // Calculate angle between direction and toTile
+                float dot = Vector3.Dot(direction, toTile);
+                float angle = Mathf.Acos(Mathf.Clamp(dot, -1f, 1f));
+                
+                // Check if within halfAngle
+                if (angle <= halfAngle)
+                {
+                    if (!clearedTiles.ContainsKey(tile))
+                    {
+                        clearedTiles[tile] = Time.time;
+                        cleared++;
+                        UpdateFrontier(tile);
+                    }
+                }
+            }
         }
-
-        // Also clear at origin
-        cleared += ClearArea(origin, tileSize * 0.5f);
 
         if (cleared > 0)
         {

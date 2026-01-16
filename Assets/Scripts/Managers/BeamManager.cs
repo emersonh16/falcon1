@@ -15,12 +15,12 @@ public class BeamManager : MonoBehaviour
     public BeamMode currentMode = BeamMode.BubbleMin;
 
     [Header("Beam Parameters")]
-    public float bubbleMinRadius = 3f;
-    public float bubbleMaxRadius = 8f;
-    public float coneLength = 14f;  // Similar to old code (224px ≈ 14 units at tileSize 0.5)
-    public float coneHalfAngle = 32f;  // degrees (64° total, same as old code)
-    public float laserLength = 32f;  // Similar to old code (512px ≈ 32 units)
-    public float laserThickness = 0.75f;  // Similar to old code (12px ≈ 0.75 units)
+    public float bubbleMinRadius = 1.5f;  // Smaller bubble
+    public float bubbleMaxRadius = 4f;    // Smaller max bubble
+    public float coneLength = 7f;         // Smaller cone
+    public float coneHalfAngle = 32f;     // degrees (64° total)
+    public float laserLength = 12f;       // Shorter laser
+    public float laserThickness = 0.5f;   // Thinner laser
 
     // Events
     public event Action<BeamMode> OnModeChanged;
