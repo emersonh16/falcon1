@@ -25,22 +25,32 @@ public partial class MiasmaRegrowthSystem : SystemBase
 
     protected override void OnUpdate()
     {
+        // TEMPORARILY DISABLED for performance testing
+        // Regrowth will be handled by MiasmaManager for now
+        return;
+        
+        /* DISABLED CODE - Re-enable when ready
         float currentTime = (float)UnityEngine.Time.time;
         float regrowDelay = 1.5f;
         float regrowChance = 0.15f;
         int regrowBudget = 512;
 
         // Process regrowth as a job
+        // Ensure seed is non-zero (Random requires non-zero seed)
+        uint seed = (uint)(currentTime * 1000);
+        if (seed == 0) seed = 1; // Ensure non-zero
+        
         var regrowthJob = new RegrowthJob
         {
             currentTime = currentTime,
             regrowDelay = regrowDelay,
             regrowChance = regrowChance,
             regrowBudget = regrowBudget,
-            random = new Unity.Mathematics.Random((uint)(currentTime * 1000))
+            random = new Unity.Mathematics.Random(seed)
         };
 
         Dependency = regrowthJob.ScheduleParallel(frontierTilesQuery, Dependency);
+        */
     }
 
     [BurstCompile]

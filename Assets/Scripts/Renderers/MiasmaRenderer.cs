@@ -21,6 +21,10 @@ public class MiasmaRenderer : MonoBehaviour
 
     [Header("Performance")]
     public int maxTilesPerBatch = 1023;  // Unity limit for DrawMeshInstanced
+    
+    [Header("Debug")]
+    [Tooltip("Disable this renderer to use ECS rendering instead")]
+    public bool rendererEnabled = true;
 
     private Mesh tileMesh;
     private Material miasmaMaterial;
@@ -31,6 +35,8 @@ public class MiasmaRenderer : MonoBehaviour
     private int lastMinX, lastMaxX, lastMinZ, lastMaxZ;
     private Vector3 lastPlayerPos;
     private bool needsRebuild = true;
+    private HashSet<Vector2Int> cachedClearedSet = new HashSet<Vector2Int>(); // Cache to avoid recreating
+    private int lastClearedCount = -1; // Track when to refresh cache
 
     void Start()
     {
@@ -74,6 +80,9 @@ public class MiasmaRenderer : MonoBehaviour
 
     void Update()
     {
+        // Disable if flag is set (for ECS testing)
+        if (!rendererEnabled) return;
+        
         if (MiasmaManager.Instance == null || player == null) return;
 
         // Player-centric: always update bounds centered on player
@@ -85,8 +94,9 @@ public class MiasmaRenderer : MonoBehaviour
             out minX, out maxX, out minZ, out maxZ);
 
         // Rebuild if bounds changed OR player moved significantly
+        // Increased threshold to reduce rebuild frequency
         bool boundsChanged = (minX != lastMinX || maxX != lastMaxX || minZ != lastMinZ || maxZ != lastMaxZ);
-        bool playerMoved = Vector3.Distance(player.position, lastPlayerPos) > MiasmaManager.Instance.tileSize * 0.5f;
+        bool playerMoved = Vector3.Distance(player.position, lastPlayerPos) > MiasmaManager.Instance.tileSize * 1.0f; // Increased from 0.5f
 
         if (boundsChanged || playerMoved || needsRebuild)
         {
@@ -113,7 +123,19 @@ public class MiasmaRenderer : MonoBehaviour
         if (MiasmaManager.Instance == null || mainCamera == null || player == null) return;
 
         float tileSize = MiasmaManager.Instance.tileSize;
-        HashSet<Vector2Int> clearedSet = new HashSet<Vector2Int>(MiasmaManager.Instance.GetClearedTiles());
+        
+        // Cache cleared set to avoid recreating HashSet every frame
+        int currentClearedCount = MiasmaManager.Instance.ClearedCount;
+        if (currentClearedCount != lastClearedCount)
+        {
+            cachedClearedSet.Clear();
+            foreach (var tile in MiasmaManager.Instance.GetClearedTiles())
+            {
+                cachedClearedSet.Add(tile);
+            }
+            lastClearedCount = currentClearedCount;
+        }
+        HashSet<Vector2Int> clearedSet = cachedClearedSet;
 
         // Calculate camera-aligned rectangle (covers viewport + extra)
         float viewW = mainCamera.orthographicSize * 2f * mainCamera.aspect;
@@ -122,7 +144,7 @@ public class MiasmaRenderer : MonoBehaviour
         
         // Expand height to account for isometric compression (30° elevation = ~15% compression)
         // cos(30°) ≈ 0.866, so we need to expand by ~1.155 to compensate
-        float isometricCompensation = 2.0f;  // Extra padding for isometric view
+        float isometricCompensation = 1.5f;  // Reduced from 2.0f for better performance
         float sheetH = viewH * Mathf.Max(1.0f, sizeMultiplier) * isometricCompensation;
 
         // Get camera's forward and right vectors (projected to XZ plane)
@@ -134,6 +156,13 @@ public class MiasmaRenderer : MonoBehaviour
         // Calculate tile grid - ensure we have enough tiles to fill the sheet
         int tilesW = Mathf.CeilToInt(sheetW / tileSize) + 1;  // +1 to ensure coverage
         int tilesH = Mathf.CeilToInt(sheetH / tileSize) + 1;
+        
+        // Pre-allocate list capacity to reduce allocations
+        int estimatedTiles = tilesW * tilesH;
+        if (visibleMatrices.Capacity < estimatedTiles)
+        {
+            visibleMatrices.Capacity = estimatedTiles;
+        }
         
         Vector3 playerPos = player.position;
         Vector3 sheetCenter = new Vector3(playerPos.x, renderHeight, playerPos.z);

@@ -3,22 +3,21 @@ using Unity.Jobs;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Mathematics;
-using Unity.Transforms;
 using UnityEngine;
 using UnityEngine.Rendering;
+using System.Collections.Generic;
 
 /// <summary>
 /// ECS System: Renders miasma tiles using GPU instancing.
 /// This is the high-performance rendering system.
 /// </summary>
 [UpdateInGroup(typeof(PresentationSystemGroup))]
-[UpdateAfter(typeof(TransformSystemGroup))]
 public partial class MiasmaRenderingSystem : SystemBase
 {
     private Mesh tileMesh;
     private Material miasmaMaterial;
     private EntityQuery renderableTilesQuery;
-    private Matrix4x4[] matricesArray = new Matrix4x4[1023];
+    private List<Matrix4x4> matricesList = new List<Matrix4x4>(); // Dynamic list for all tiles
 
     protected override void OnCreate()
     {
@@ -28,7 +27,7 @@ public partial class MiasmaRenderingSystem : SystemBase
             ComponentType.ReadOnly<MiasmaRenderTag>()
         );
 
-        RequireForUpdate(renderableTilesQuery);
+        // In 2021.3, RequireForUpdate works differently - just check query in OnUpdate
     }
 
     protected override void OnStartRunning()
@@ -39,7 +38,14 @@ public partial class MiasmaRenderingSystem : SystemBase
 
     protected override void OnUpdate()
     {
+        // DISABLED: ECS rendering is slower than MiasmaRenderer for this use case
+        // Use MiasmaRenderer instead (set rendererEnabled = true)
+        return;
+        
         if (tileMesh == null || miasmaMaterial == null) return;
+        
+        // Check if we have any tiles to render
+        if (renderableTilesQuery.IsEmptyIgnoreFilter) return;
 
         // Get all renderable tiles
         var tiles = renderableTilesQuery.ToComponentDataArray<MiasmaTileComponent>(Allocator.TempJob);
@@ -51,40 +57,50 @@ public partial class MiasmaRenderingSystem : SystemBase
         }
 
         // Build matrices for GPU instancing
-        int visibleCount = 0;
-        float scale = 0.25f * 1.5f; // tileSize * overlap (should match MiasmaManager.tileSize)
+        matricesList.Clear();
         
+        // Get tile size from MiasmaECSManager or use default
+        float tileSize = 0.25f;
+        if (MiasmaECSManager.Instance != null)
+        {
+            tileSize = MiasmaECSManager.Instance.tileSize;
+        }
+        float scale = tileSize * 1.8f; // Increased overlap to eliminate gaps
+        
+        // Collect all non-cleared tiles
         for (int i = 0; i < tiles.Length; i++)
         {
             if (!tiles[i].isCleared)
             {
                 float3 pos = tiles[i].worldPosition;
-                matricesArray[visibleCount] = Matrix4x4.TRS(
+                matricesList.Add(Matrix4x4.TRS(
                     new Vector3(pos.x, pos.y, pos.z),
                     Quaternion.Euler(0f, 45f, 0f), // Rotate 45° for diamond appearance
                     new Vector3(scale, 1f, scale)
-                );
-                visibleCount++;
+                ));
             }
         }
 
         // Draw in batches (Unity limit: 1023 per call)
         int batchSize = 1023;
         int drawn = 0;
+        Matrix4x4[] batchArray = new Matrix4x4[batchSize];
 
-        while (drawn < visibleCount)
+        while (drawn < matricesList.Count)
         {
-            int currentBatch = math.min(batchSize, visibleCount - drawn);
+            int currentBatch = math.min(batchSize, matricesList.Count - drawn);
             
-            // Create temporary array for this batch
-            Matrix4x4[] batchMatrices = new Matrix4x4[currentBatch];
-            System.Array.Copy(matricesArray, drawn, batchMatrices, 0, currentBatch);
+            // Copy batch to array
+            for (int i = 0; i < currentBatch; i++)
+            {
+                batchArray[i] = matricesList[drawn + i];
+            }
             
             Graphics.DrawMeshInstanced(
                 tileMesh,
                 0,
                 miasmaMaterial,
-                batchMatrices,
+                batchArray,
                 currentBatch
             );
             drawn += currentBatch;
