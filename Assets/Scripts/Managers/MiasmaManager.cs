@@ -11,8 +11,9 @@ public class MiasmaManager : MonoBehaviour
     public static MiasmaManager Instance { get; private set; }
 
     [Header("Tile Settings")]
-    public float tileSize = 0.5f;  // World units per tile (smaller = finer detail)
-    public int viewPadding = 10;   // Extra tiles beyond viewport
+    [Tooltip("World units per tile. 0.0625 = 1/8th of original 0.5")]
+    public float tileSize = 0.0625f;  // World units per tile (1/8th of 0.5f = much smaller)
+    public int viewPadding = 20;   // Extra tiles beyond viewport (increased since tiles are smaller)
 
     [Header("Regrowth")]
     public float regrowDelay = 1.5f;    // Seconds before regrowth can occur
@@ -42,13 +43,11 @@ public class MiasmaManager : MonoBehaviour
         Instance = this;
     }
 
+    private bool beamSubscribed = false;
+
     void Start()
     {
-        // Subscribe to beam events
-        if (BeamManager.Instance != null)
-        {
-            BeamManager.Instance.OnBeamFired += OnBeamFired;
-        }
+        SubscribeToBeam();
     }
 
     void OnDestroy()
@@ -56,11 +55,33 @@ public class MiasmaManager : MonoBehaviour
         if (BeamManager.Instance != null)
         {
             BeamManager.Instance.OnBeamFired -= OnBeamFired;
+            BeamManager.Instance.OnBeamFiredCone -= OnBeamFiredCone;
+            BeamManager.Instance.OnBeamFiredLaser -= OnBeamFiredLaser;
+        }
+    }
+
+    void SubscribeToBeam()
+    {
+        if (!beamSubscribed && BeamManager.Instance != null)
+        {
+            BeamManager.Instance.OnBeamFired += OnBeamFired;
+            BeamManager.Instance.OnBeamFiredCone += OnBeamFiredCone;
+            BeamManager.Instance.OnBeamFiredLaser += OnBeamFiredLaser;
+            beamSubscribed = true;
         }
     }
 
     void Update()
     {
+        // Retry subscription if not connected yet
+        if (!beamSubscribed)
+        {
+            SubscribeToBeam();
+        }
+
+        // Note: Clearing is now handled via events from BeamRenderer
+        // This direct polling is kept as backup but events are primary
+
         ProcessRegrowth();
     }
 
@@ -70,6 +91,16 @@ public class MiasmaManager : MonoBehaviour
         {
             ClearArea(worldPos, radius);
         }
+    }
+
+    void OnBeamFiredCone(Vector3 origin, Vector3 direction, float length, float halfAngleDeg)
+    {
+        ClearCone(origin, direction, length, halfAngleDeg);
+    }
+
+    void OnBeamFiredLaser(Vector3 origin, Vector3 direction, float length, float thickness)
+    {
+        ClearLaser(origin, direction, length, thickness);
     }
 
     /// <summary>
@@ -104,6 +135,73 @@ public class MiasmaManager : MonoBehaviour
                     }
                 }
             }
+        }
+
+        if (cleared > 0)
+        {
+            OnClearedChanged?.Invoke();
+        }
+
+        return cleared;
+    }
+
+    /// <summary>
+    /// Clear miasma in a cone shape (sector)
+    /// </summary>
+    public int ClearCone(Vector3 origin, Vector3 direction, float length, float halfAngleDeg)
+    {
+        int cleared = 0;
+        float halfAngle = halfAngleDeg * Mathf.Deg2Rad;
+        direction.y = 0f;  // Keep on XZ plane
+        direction.Normalize();
+
+        // Sample along the cone length
+        float step = tileSize * 0.5f;  // Sample every half tile
+        int steps = Mathf.CeilToInt(length / step);
+
+        for (int i = 1; i <= steps; i++)
+        {
+            float dist = i * step;
+            if (dist > length) dist = length;
+
+            Vector3 center = origin + direction * dist;
+            float radius = Mathf.Max(tileSize * 0.5f, Mathf.Tan(halfAngle) * dist);
+
+            cleared += ClearArea(center, radius);
+        }
+
+        // Also clear at origin
+        cleared += ClearArea(origin, tileSize * 0.5f);
+
+        if (cleared > 0)
+        {
+            OnClearedChanged?.Invoke();
+        }
+
+        return cleared;
+    }
+
+    /// <summary>
+    /// Clear miasma in a laser shape (line with thickness)
+    /// </summary>
+    public int ClearLaser(Vector3 origin, Vector3 direction, float length, float thickness)
+    {
+        int cleared = 0;
+        direction.y = 0f;  // Keep on XZ plane
+        direction.Normalize();
+
+        // Sample along the laser length
+        float step = tileSize * 0.4f;  // Sample frequently for smooth line
+        int steps = Mathf.CeilToInt(length / step);
+        float halfThick = thickness * 0.5f;
+
+        for (int i = 0; i <= steps; i++)
+        {
+            float dist = i * step;
+            if (dist > length) dist = length;
+
+            Vector3 center = origin + direction * dist;
+            cleared += ClearArea(center, halfThick);
         }
 
         if (cleared > 0)

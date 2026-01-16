@@ -17,14 +17,16 @@ public class BeamManager : MonoBehaviour
     [Header("Beam Parameters")]
     public float bubbleMinRadius = 3f;
     public float bubbleMaxRadius = 8f;
-    public float coneLength = 14f;
-    public float coneHalfAngle = 32f;  // degrees
-    public float laserLength = 32f;
-    public float laserThickness = 0.75f;
+    public float coneLength = 14f;  // Similar to old code (224px ≈ 14 units at tileSize 0.5)
+    public float coneHalfAngle = 32f;  // degrees (64° total, same as old code)
+    public float laserLength = 32f;  // Similar to old code (512px ≈ 32 units)
+    public float laserThickness = 0.75f;  // Similar to old code (12px ≈ 0.75 units)
 
     // Events
     public event Action<BeamMode> OnModeChanged;
-    public event Action<Vector3, float> OnBeamFired;  // position, radius
+    public event Action<Vector3, float> OnBeamFired;  // position, radius (for bubble)
+    public event Action<Vector3, Vector3, float, float> OnBeamFiredCone;  // origin, direction, length, halfAngle
+    public event Action<Vector3, Vector3, float, float> OnBeamFiredLaser;  // origin, direction, length, thickness
 
     void Awake()
     {
@@ -78,15 +80,68 @@ public class BeamManager : MonoBehaviour
         {
             case BeamMode.BubbleMin: return bubbleMinRadius;
             case BeamMode.BubbleMax: return bubbleMaxRadius;
+            case BeamMode.Cone: 
+                // Return approximate clearing radius (cone tip width)
+                return Mathf.Tan(coneHalfAngle * Mathf.Deg2Rad) * coneLength;
+            case BeamMode.Laser: 
+                // Return laser thickness as clearing radius
+                return laserThickness;
             default: return 0f;
         }
     }
 
     /// <summary>
-    /// Called by BeamRenderer to notify that beam cleared an area
+    /// Get clearing parameters for current mode
+    /// </summary>
+    public void GetClearingParams(Vector3 origin, Vector3 direction, out Vector3 clearPos, out float clearRadius)
+    {
+        clearPos = origin;
+        clearRadius = 0f;
+
+        switch (currentMode)
+        {
+            case BeamMode.BubbleMin:
+                clearPos = origin;
+                clearRadius = bubbleMinRadius;
+                break;
+            case BeamMode.BubbleMax:
+                clearPos = origin;
+                clearRadius = bubbleMaxRadius;
+                break;
+            case BeamMode.Cone:
+                // Clear along cone path
+                clearPos = origin + direction * (coneLength * 0.5f);
+                clearRadius = Mathf.Tan(coneHalfAngle * Mathf.Deg2Rad) * coneLength;
+                break;
+            case BeamMode.Laser:
+                // Clear along laser path
+                clearPos = origin + direction * (laserLength * 0.5f);
+                clearRadius = laserThickness;
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Called by BeamRenderer to notify that beam cleared an area (bubble modes)
     /// </summary>
     public void FireBeam(Vector3 position, float radius)
     {
         OnBeamFired?.Invoke(position, radius);
+    }
+
+    /// <summary>
+    /// Fire cone beam (for clearing)
+    /// </summary>
+    public void FireBeamCone(Vector3 origin, Vector3 direction)
+    {
+        OnBeamFiredCone?.Invoke(origin, direction, coneLength, coneHalfAngle);
+    }
+
+    /// <summary>
+    /// Fire laser beam (for clearing)
+    /// </summary>
+    public void FireBeamLaser(Vector3 origin, Vector3 direction)
+    {
+        OnBeamFiredLaser?.Invoke(origin, direction, laserLength, laserThickness);
     }
 }

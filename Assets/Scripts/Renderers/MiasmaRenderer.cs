@@ -14,6 +14,10 @@ public class MiasmaRenderer : MonoBehaviour
     [Header("Visual Settings")]
     public Color miasmaColor = new Color(0.5f, 0f, 0.7f, 0.9f);  // Purple
     public float renderHeight = 0.01f;  // Y position of miasma sheet
+    
+    [Header("Sheet Size")]
+    [Tooltip("Multiplier for viewport size. 1.0 = exact viewport, 1.5 = 50% larger")]
+    public float sizeMultiplier = 1.2f;  // Make sheet larger than viewport (1.0 = exact fit)
 
     [Header("Performance")]
     public int maxTilesPerBatch = 1023;  // Unity limit for DrawMeshInstanced
@@ -25,6 +29,7 @@ public class MiasmaRenderer : MonoBehaviour
     private MaterialPropertyBlock propertyBlock;
 
     private int lastMinX, lastMaxX, lastMinZ, lastMaxZ;
+    private Vector3 lastPlayerPos;
     private bool needsRebuild = true;
 
     void Start()
@@ -71,7 +76,7 @@ public class MiasmaRenderer : MonoBehaviour
     {
         if (MiasmaManager.Instance == null || player == null) return;
 
-        // Check if view bounds changed
+        // Player-centric: always update bounds centered on player
         float viewW = mainCamera.orthographicSize * 2f * mainCamera.aspect;
         float viewH = mainCamera.orthographicSize * 2f;
 
@@ -79,11 +84,16 @@ public class MiasmaRenderer : MonoBehaviour
         MiasmaManager.Instance.GetVisibleBounds(player.position, viewW, viewH,
             out minX, out maxX, out minZ, out maxZ);
 
-        if (minX != lastMinX || maxX != lastMaxX || minZ != lastMinZ || maxZ != lastMaxZ)
+        // Rebuild if bounds changed OR player moved significantly
+        bool boundsChanged = (minX != lastMinX || maxX != lastMaxX || minZ != lastMinZ || maxZ != lastMaxZ);
+        bool playerMoved = Vector3.Distance(player.position, lastPlayerPos) > MiasmaManager.Instance.tileSize * 0.5f;
+
+        if (boundsChanged || playerMoved || needsRebuild)
         {
-            needsRebuild = true;
             lastMinX = minX; lastMaxX = maxX;
             lastMinZ = minZ; lastMaxZ = maxZ;
+            lastPlayerPos = player.position;
+            needsRebuild = true;
         }
 
         if (needsRebuild)
@@ -100,28 +110,54 @@ public class MiasmaRenderer : MonoBehaviour
     {
         visibleMatrices.Clear();
 
-        if (MiasmaManager.Instance == null) return;
+        if (MiasmaManager.Instance == null || mainCamera == null || player == null) return;
 
         float tileSize = MiasmaManager.Instance.tileSize;
         HashSet<Vector2Int> clearedSet = new HashSet<Vector2Int>(MiasmaManager.Instance.GetClearedTiles());
 
-        // Generate matrices for all visible tiles that are NOT cleared
-        for (int x = lastMinX; x <= lastMaxX; x++)
+        // Calculate camera-aligned rectangle (covers viewport + extra)
+        float viewW = mainCamera.orthographicSize * 2f * mainCamera.aspect;
+        float viewH = mainCamera.orthographicSize * 2f;
+        float sheetW = viewW * Mathf.Max(1.0f, sizeMultiplier);  // At least cover viewport
+        
+        // Expand height to account for isometric compression (30° elevation = ~15% compression)
+        // cos(30°) ≈ 0.866, so we need to expand by ~1.155 to compensate
+        float isometricCompensation = 2.0f;  // Extra padding for isometric view
+        float sheetH = viewH * Mathf.Max(1.0f, sizeMultiplier) * isometricCompensation;
+
+        // Get camera's forward and right vectors (projected to XZ plane)
+        Vector3 camForward = mainCamera.transform.forward;
+        camForward.y = 0f;
+        camForward.Normalize();
+        Vector3 camRight = Vector3.Cross(Vector3.up, camForward).normalized;
+
+        // Calculate tile grid - ensure we have enough tiles to fill the sheet
+        int tilesW = Mathf.CeilToInt(sheetW / tileSize) + 1;  // +1 to ensure coverage
+        int tilesH = Mathf.CeilToInt(sheetH / tileSize) + 1;
+        
+        Vector3 playerPos = player.position;
+        Vector3 sheetCenter = new Vector3(playerPos.x, renderHeight, playerPos.z);
+        Vector3 sheetBottomLeft = sheetCenter - camRight * (sheetW * 0.5f) - camForward * (sheetH * 0.5f);
+
+        // Generate tiles in camera-aligned grid - tiles should overlap slightly to avoid gaps
+        for (int tx = 0; tx < tilesW; tx++)
         {
-            for (int z = lastMinZ; z <= lastMaxZ; z++)
+            for (int tz = 0; tz < tilesH; tz++)
             {
-                Vector2Int tile = new Vector2Int(x, z);
+                // Position in camera-aligned space (tiles edge-to-edge)
+                Vector3 localPos = camRight * (tx * tileSize) + camForward * (tz * tileSize);
+                Vector3 worldPos = sheetBottomLeft + localPos + new Vector3(tileSize * 0.5f, 0f, tileSize * 0.5f);
+
+                // Check if this world position's tile is cleared
+                Vector2Int tile = MiasmaManager.Instance.WorldToTile(worldPos);
                 
                 // Skip cleared tiles (no miasma there)
                 if (clearedSet.Contains(tile)) continue;
 
-                Vector3 pos = new Vector3(
-                    (x + 0.5f) * tileSize,
-                    renderHeight,
-                    (z + 0.5f) * tileSize
-                );
-
-                Matrix4x4 matrix = Matrix4x4.TRS(pos, Quaternion.identity, new Vector3(tileSize, 1f, tileSize));
+                // Create matrix - tiles overlap to eliminate visible gaps
+                // 5% overlap should eliminate gaps completely
+                float scale = tileSize * 1.5f;
+                Matrix4x4 matrix = Matrix4x4.TRS(worldPos, Quaternion.identity, new Vector3(scale, 1f, scale));
                 visibleMatrices.Add(matrix);
             }
         }
