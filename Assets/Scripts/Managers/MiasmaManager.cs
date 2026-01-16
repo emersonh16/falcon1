@@ -1,30 +1,61 @@
 using UnityEngine;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 /// <summary>
 /// Manages miasma state using inverse model - tracks cleared tiles only.
 /// Miasma is assumed everywhere except where cleared.
+/// Improved regrowth system with multi-zone filtering, TTL, and dynamic budgets.
 /// </summary>
 public class MiasmaManager : MonoBehaviour
 {
     public static MiasmaManager Instance { get; private set; }
 
     [Header("Tile Settings")]
-    [Tooltip("World units per tile. 0.0625 = 1/8th of original 0.5")]
-    public float tileSize = 0.0625f;  // World units per tile (1/8th of 0.5f = much smaller)
-    public int viewPadding = 20;   // Extra tiles beyond viewport (increased since tiles are smaller)
+    [Tooltip("World units per tile")]
+    public float tileSize = 0.25f;  // World units per tile
+    public int viewPadding = 20;   // Extra tiles beyond viewport
 
-    [Header("Regrowth")]
-    public float regrowDelay = 1.5f;    // Seconds before regrowth can occur
-    public float regrowChance = 0.15f;  // Chance per frame per eligible tile
-    public int regrowBudget = 512;      // Max tiles to regrow per frame
+    [Header("Regrowth - Basic")]
+    [Tooltip("Seconds before regrowth can occur")]
+    public float regrowDelay = 1.0f;
+    [Tooltip("Base chance per frame per eligible tile (0-1)")]
+    public float regrowChance = 0.6f;  // 60% like old code
+    [Tooltip("Multiplier for regrow speed")]
+    public float regrowSpeedFactor = 1.0f;
+    [Tooltip("Base max tiles to regrow per frame (will scale with viewport)")]
+    public int regrowBudget = 512;
+
+    [Header("Regrowth - Zones")]
+    [Tooltip("Padding for base keep zone (viewport + this)")]
+    public int regrowScanPad = 6;
+    [Tooltip("Tiles beyond keep zone where regrowth happens")]
+    public int offscreenRegrowPad = 36;  // 6 * 6
+    [Tooltip("Tiles beyond which cleared tiles are auto-forgotten")]
+    public int offscreenForgetPad = 72;  // 6 * 12
+
+    [Header("Memory Management")]
+    [Tooltip("Max cleared tiles before oldest are removed (0 = unlimited)")]
+    public int maxClearedCap = 50000;
+    [Tooltip("Max frontier tiles to scan per frame (prevents huge scans)")]
+    public int maxRegrowScanPerFrame = 4000;
+    [Tooltip("Auto-remove cleared tiles older than this (seconds, 0 = disabled)")]
+    public float clearedTTL = 20f;
 
     // Cleared tiles: key = tile coord, value = time cleared
     private Dictionary<Vector2Int, float> clearedTiles = new Dictionary<Vector2Int, float>();
     
     // Frontier: boundary tiles eligible for regrowth
     private HashSet<Vector2Int> frontier = new HashSet<Vector2Int>();
+
+    // Dynamic budgets (calculated from viewport)
+    private int currentRegrowBudget;
+    private float currentViewW, currentViewH;
+
+    // Player position tracking (for zone calculations)
+    private Vector3 lastPlayerPos;
+    private Camera mainCamera;
 
     // Events
     public event Action OnClearedChanged;
@@ -48,6 +79,10 @@ public class MiasmaManager : MonoBehaviour
     void Start()
     {
         SubscribeToBeam();
+        if (mainCamera == null)
+        {
+            mainCamera = Camera.main;
+        }
     }
 
     void OnDestroy()
@@ -79,10 +114,37 @@ public class MiasmaManager : MonoBehaviour
             SubscribeToBeam();
         }
 
-        // Note: Clearing is now handled via events from BeamRenderer
-        // This direct polling is kept as backup but events are primary
+        // Update dynamic budgets if viewport changed
+        UpdateBudgets();
 
+        // Process regrowth with multi-zone filtering
         ProcessRegrowth();
+
+        // Cleanup old tiles (TTL and hard cap)
+        ProcessCleanup();
+    }
+
+    void UpdateBudgets()
+    {
+        if (mainCamera == null) mainCamera = Camera.main;
+        if (mainCamera == null) return;
+
+        float viewW = mainCamera.orthographicSize * 2f * mainCamera.aspect;
+        float viewH = mainCamera.orthographicSize * 2f;
+
+        // Only recalculate if viewport changed significantly
+        if (Mathf.Abs(viewW - currentViewW) > 0.1f || Mathf.Abs(viewH - currentViewH) > 0.1f)
+        {
+            currentViewW = viewW;
+            currentViewH = viewH;
+
+            int viewCols = Mathf.CeilToInt(viewW / tileSize);
+            int viewRows = Mathf.CeilToInt(viewH / tileSize);
+            int screenTiles = viewCols * viewRows;
+
+            // Dynamic budget = max(screenTiles, baseBudget)
+            currentRegrowBudget = Mathf.Max(screenTiles, regrowBudget);
+        }
     }
 
     void OnBeamFired(Vector3 worldPos, float radius)
@@ -249,39 +311,175 @@ public class MiasmaManager : MonoBehaviour
     {
         if (frontier.Count == 0) return;
 
-        int budget = regrowBudget;
+        // Get player position for zone calculations
+        Vector3 playerPos = GetPlayerPosition();
+        if (playerPos == Vector3.zero && mainCamera != null)
+        {
+            // Fallback: use camera position projected to ground
+            playerPos = mainCamera.transform.position;
+            playerPos.y = 0f;
+        }
+
+        // Calculate zones based on viewport
+        if (mainCamera == null) mainCamera = Camera.main;
+        if (mainCamera == null) return;
+
+        float viewW = mainCamera.orthographicSize * 2f * mainCamera.aspect;
+        float viewH = mainCamera.orthographicSize * 2f;
+        int viewCols = Mathf.CeilToInt(viewW / tileSize);
+        int viewRows = Mathf.CeilToInt(viewH / tileSize);
+
+        Vector2Int centerTile = WorldToTile(playerPos);
+
+        // Base keep zone (viewport + scanPad)
+        int keepLeft = centerTile.x - viewCols / 2 - regrowScanPad;
+        int keepTop = centerTile.y - viewRows / 2 - regrowScanPad;
+        int keepRight = keepLeft + viewCols + regrowScanPad * 2;
+        int keepBottom = keepTop + viewRows + regrowScanPad * 2;
+
+        // Extended regrow zone (keep + offscreenRegrowPad)
+        int regLeft = keepLeft - offscreenRegrowPad;
+        int regTop = keepTop - offscreenRegrowPad;
+        int regRight = keepRight + offscreenRegrowPad;
+        int regBottom = keepBottom + offscreenRegrowPad;
+
+        // Far forget zone (beyond offscreenForgetPad)
+        int forgetLeft = keepLeft - Mathf.Max(offscreenForgetPad, offscreenRegrowPad + regrowScanPad);
+        int forgetTop = keepTop - Mathf.Max(offscreenForgetPad, offscreenRegrowPad + regrowScanPad);
+        int forgetRight = keepRight + Mathf.Max(offscreenForgetPad, offscreenRegrowPad + regrowScanPad);
+        int forgetBottom = keepBottom + Mathf.Max(offscreenForgetPad, offscreenRegrowPad + regrowScanPad);
+
+        // Process regrowth with zone filtering
+        int budget = currentRegrowBudget;
         List<Vector2Int> toRegrow = new List<Vector2Int>();
+        List<Vector2Int> toForget = new List<Vector2Int>();
         float currentTime = Time.time;
+        float chance = regrowChance * regrowSpeedFactor;
+        int scanned = 0;
 
         foreach (var tile in frontier)
         {
-            if (budget <= 0) break;
+            if (budget <= 0 || scanned >= maxRegrowScanPerFrame) break;
+            scanned++;
 
-            if (!clearedTiles.TryGetValue(tile, out float clearedTime)) continue;
+            if (!clearedTiles.TryGetValue(tile, out float clearedTime))
+            {
+                frontier.Remove(tile);
+                continue;
+            }
+
+            // Check if tile is in forget zone - auto-forget
+            if (tile.x < forgetLeft || tile.x >= forgetRight || tile.y < forgetTop || tile.y >= forgetBottom)
+            {
+                toForget.Add(tile);
+                continue;
+            }
+
+            // Skip if outside regrow zone (but not in forget zone)
+            if (tile.x < regLeft || tile.x >= regRight || tile.y < regTop || tile.y >= regBottom)
+            {
+                continue;
+            }
+
+            // Must be boundary to regrow
+            if (!IsBoundary(tile))
+            {
+                frontier.Remove(tile);
+                continue;
+            }
 
             // Check delay
             if (currentTime - clearedTime < regrowDelay) continue;
 
             // Random chance
-            if (UnityEngine.Random.value < regrowChance)
+            if (UnityEngine.Random.value < chance)
             {
                 toRegrow.Add(tile);
                 budget--;
             }
         }
 
+        // Apply forget (remove far-off tiles)
+        foreach (var tile in toForget)
+        {
+            RemoveClearedTile(tile);
+        }
+
         // Apply regrowth
         foreach (var tile in toRegrow)
         {
-            clearedTiles.Remove(tile);
-            frontier.Remove(tile);
-            UpdateNeighborFrontier(tile);
+            RemoveClearedTile(tile);
         }
 
-        if (toRegrow.Count > 0)
+        if (toRegrow.Count > 0 || toForget.Count > 0)
         {
             OnClearedChanged?.Invoke();
         }
+    }
+
+    void ProcessCleanup()
+    {
+        if (clearedTiles.Count == 0) return;
+
+        float currentTime = Time.time;
+        List<Vector2Int> toRemove = new List<Vector2Int>();
+
+        // TTL cleanup: remove tiles older than clearedTTL
+        if (clearedTTL > 0)
+        {
+            foreach (var kvp in clearedTiles)
+            {
+                if (currentTime - kvp.Value > clearedTTL)
+                {
+                    toRemove.Add(kvp.Key);
+                }
+            }
+        }
+
+        // Hard cap cleanup: if exceeded, remove oldest tiles
+        if (maxClearedCap > 0 && clearedTiles.Count > maxClearedCap)
+        {
+            int overflow = clearedTiles.Count - maxClearedCap;
+            // Get oldest tiles
+            var sorted = clearedTiles.OrderBy(kvp => kvp.Value).Take(overflow);
+            foreach (var kvp in sorted)
+            {
+                if (!toRemove.Contains(kvp.Key))
+                {
+                    toRemove.Add(kvp.Key);
+                }
+            }
+        }
+
+        // Apply removals
+        foreach (var tile in toRemove)
+        {
+            RemoveClearedTile(tile);
+        }
+
+        if (toRemove.Count > 0)
+        {
+            OnClearedChanged?.Invoke();
+        }
+    }
+
+    void RemoveClearedTile(Vector2Int tile)
+    {
+        if (!clearedTiles.ContainsKey(tile)) return;
+
+        clearedTiles.Remove(tile);
+        frontier.Remove(tile);
+        UpdateNeighborFrontier(tile);
+    }
+
+    Vector3 GetPlayerPosition()
+    {
+        var derelict = GameObject.Find("Derelict");
+        if (derelict != null)
+        {
+            return derelict.transform.position;
+        }
+        return Vector3.zero;
     }
 
     void UpdateFrontier(Vector2Int tile)
