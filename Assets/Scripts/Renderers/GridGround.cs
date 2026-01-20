@@ -6,10 +6,14 @@ using UnityEngine;
 /// </summary>
 public class GridGround : MonoBehaviour
 {
-    [Header("Grid Settings")]
+    [Header("Ground Settings")]
+    public float groundSize = 200f;     // Size of ground plane (world units)
+    public Color groundColor = new Color(0.2f, 0.6f, 0.2f, 1f);  // Solid green
+    
+    [Header("Grid Lines (Optional)")]
+    public bool showGridLines = false;  // Toggle grid lines on/off
     public int gridSize = 50;           // Number of cells in each direction
     public float cellSize = 2f;         // Size of each cell in world units
-    public Color groundColor = new Color(0.2f, 0.6f, 0.2f);  // Green
     public Color lineColor = new Color(0.3f, 0.7f, 0.3f);     // Lighter green
     public float lineWidth = 0.05f;
 
@@ -38,31 +42,54 @@ public class GridGround : MonoBehaviour
             ground.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
         }
         
-        float totalSize = gridSize * cellSize;
-        ground.transform.localScale = new Vector3(totalSize, totalSize, 1f);
+        // Use groundSize instead of calculated size for solid ground
+        ground.transform.localScale = new Vector3(groundSize, groundSize, 1f);
         
-        // Update ground material color (always update to current color)
+        // Create/update ground material with solid green color
         Renderer groundRenderer = ground.GetComponent<Renderer>();
-        if (groundRenderer.material != null)
+        Material groundMat;
+        
+        // Use Unlit shader for solid color that doesn't require lighting
+        Shader unlitShader = Shader.Find("Unlit/Color");
+        if (unlitShader == null)
         {
-            groundRenderer.material.color = groundColor;
+            unlitShader = Shader.Find("Sprites/Default");
         }
-        else
+        
+        if (groundRenderer.material == null || groundRenderer.material.shader.name != unlitShader.name)
         {
-            Material groundMat = new Material(Shader.Find("Sprites/Default"));
-            groundMat.color = groundColor;
+            groundMat = new Material(unlitShader);
             groundRenderer.material = groundMat;
         }
-
-        // Only create grid lines if they don't exist
-        if (transform.Find("GridLines") == null)
+        else
         {
-            CreateGridLines(totalSize);
+            groundMat = groundRenderer.material;
+        }
+        
+        groundMat.color = groundColor;
+
+        // Handle grid lines based on showGridLines setting
+        Transform gridLinesParent = transform.Find("GridLines");
+        if (showGridLines)
+        {
+            float totalSize = gridSize * cellSize;
+            if (gridLinesParent == null)
+            {
+                CreateGridLines(totalSize);
+            }
+            else
+            {
+                // Update existing grid line colors
+                UpdateGridLineColors();
+            }
         }
         else
         {
-            // Update existing grid line colors
-            UpdateGridLineColors();
+            // Remove grid lines if they exist and we don't want them
+            if (gridLinesParent != null)
+            {
+                DestroyImmediate(gridLinesParent.gameObject);
+            }
         }
     }
 
