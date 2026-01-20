@@ -2,8 +2,8 @@ using UnityEngine;
 using System.Collections.Generic;
 
 /// <summary>
-/// Renders miasma as a sheet with holes where cleared.
-/// Uses GPU instancing for performance.
+/// Renders miasma as a single sheet with holes cut via texture mask.
+/// Uses RenderTexture to track cleared tiles for efficient GPU-based rendering.
 /// </summary>
 public class MiasmaRenderer : MonoBehaviour
 {
@@ -15,35 +15,50 @@ public class MiasmaRenderer : MonoBehaviour
     public Color miasmaColor = new Color(0.5f, 0f, 0.7f, 0.9f);  // Purple
     public float renderHeight = 0.01f;  // Y position of miasma sheet
     
+    [Header("Texture Settings")]
+    [Tooltip("Resolution of the cleared tiles mask texture (power of 2 recommended)")]
+    public int textureResolution = 512;
+    [Tooltip("World units covered by texture (larger = lower detail, smaller = higher detail)")]
+    public float textureWorldSize = 50f;  // World units per texture
+    [Tooltip("Circle radius multiplier for clearing (larger = more coverage, ensures no gaps)")]
+    [Range(0.5f, 2.0f)]
+    public float clearingRadiusMultiplier = 1.2f;  // Multiplier for circle radius when drawing cleared areas
+    
     [Header("Sheet Size")]
-    [Tooltip("Multiplier for viewport size. 1.0 = exact viewport, 1.5 = 50% larger")]
-    public float sizeMultiplier = 2.0f;  // Make sheet much larger to prevent edge shimmering
-
-    [Header("Performance")]
-    public int maxTilesPerBatch = 1023;  // Unity limit for DrawMeshInstanced
+    [Tooltip("Multiplier for viewport size. 1.0 = exact viewport, 2.0 = 2x larger")]
+    public float sizeMultiplier = 2.0f;  // Make sheet larger to prevent edge shimmering
 
     [Header("Smoothing")]
     [Tooltip("How fast the miasma sheet follows the player (higher = faster, 0 = instant)")]
     [Range(0f, 20f)]
     public float smoothingSpeed = 8f;  // Smooth interpolation speed
 
-    private Mesh tileMesh;
+    private Mesh sheetMesh;
     private Material miasmaMaterial;
-    private Matrix4x4[] matrices;
-    private List<Matrix4x4> visibleMatrices = new List<Matrix4x4>();
+    private RenderTexture clearedMaskTexture;
+    private Texture2D updateTexture;  // CPU-side texture for updates
     private MaterialPropertyBlock propertyBlock;
 
-    private int lastMinX, lastMaxX, lastMinZ, lastMaxZ;
-    private Vector3 lastPlayerPos;
-    private Vector3 smoothedSheetCenter;  // Smoothed position for sheet center
-    private bool needsRebuild = true;
+    private Vector3 smoothedSheetCenter;
+    private Vector3 lastTextureCenter;  // Track when to re-center texture
     private bool isInitialized = false;
+    
+    // World-to-texture coordinate mapping
+    private float textureScaleX, textureScaleZ;
+    private float textureOffsetX, textureOffsetZ;
+    
+    // Track which tiles need texture updates
+    private HashSet<Vector2Int> pendingUpdates = new HashSet<Vector2Int>();
+    private bool needsFullRefresh = false;
+    
+    // Re-center texture when player moves significantly
+    private float textureRecenteringThreshold = 10f;  // World units
 
     void Start()
     {
-        CreateTileMesh();
+        CreateSheetMesh();
+        CreateTexture();
         CreateMaterial();
-        matrices = new Matrix4x4[maxTilesPerBatch];
         propertyBlock = new MaterialPropertyBlock();
 
         // Subscribe to changes
@@ -71,23 +86,44 @@ public class MiasmaRenderer : MonoBehaviour
         if (MiasmaManager.Instance != null)
         {
             MiasmaManager.Instance.OnClearedChanged -= OnClearedChanged;
+            MiasmaManager.Instance.OnTilesChanged -= OnTilesChanged;
+        }
+        
+        if (clearedMaskTexture != null)
+        {
+            clearedMaskTexture.Release();
+            Destroy(clearedMaskTexture);
+        }
+        
+        if (updateTexture != null)
+        {
+            Destroy(updateTexture);
         }
     }
 
     void OnClearedChanged()
     {
-        needsRebuild = true;
+        // Mark that we need to update the texture
+        needsFullRefresh = true;
+    }
+
+    void OnTilesChanged(HashSet<Vector2Int> changedTiles)
+    {
+        // Add changed tiles to pending updates for efficient partial refresh
+        pendingUpdates.UnionWith(changedTiles);
     }
 
     void Update()
     {
-        if (MiasmaManager.Instance == null || player == null) return;
+        if (MiasmaManager.Instance == null || player == null || mainCamera == null) return;
 
         // Initialize smoothed position on first frame
         if (!isInitialized)
         {
             smoothedSheetCenter = new Vector3(player.position.x, renderHeight, player.position.z);
+            lastTextureCenter = smoothedSheetCenter;
             isInitialized = true;
+            needsFullRefresh = true;  // Initial full refresh
         }
 
         // Smooth the sheet center position towards player position
@@ -98,143 +134,291 @@ public class MiasmaRenderer : MonoBehaviour
         }
         else
         {
-            smoothedSheetCenter = targetCenter;  // Instant if smoothing disabled
+            smoothedSheetCenter = targetCenter;
         }
 
-        // Player-centric: always update bounds centered on player
-        float viewW = mainCamera.orthographicSize * 2f * mainCamera.aspect;
-        float viewH = mainCamera.orthographicSize * 2f;
-
-        int minX, maxX, minZ, maxZ;
-        MiasmaManager.Instance.GetVisibleBounds(player.position, viewW, viewH,
-            out minX, out maxX, out minZ, out maxZ);
-
-        // Rebuild if bounds changed OR player moved significantly OR smoothed position changed
-        // Use larger threshold to reduce rebuild frequency and prevent shimmering
-        bool boundsChanged = (minX != lastMinX || maxX != lastMaxX || minZ != lastMinZ || maxZ != lastMaxZ);
-        float rebuildThreshold = MiasmaManager.Instance.tileSize * 2.0f;  // Rebuild only after moving 2 full tiles
-        bool playerMoved = Vector3.Distance(player.position, lastPlayerPos) > rebuildThreshold;
+        // Check if texture needs re-centering (player moved significantly)
+        float distanceFromTextureCenter = Vector3.Distance(
+            new Vector3(smoothedSheetCenter.x, 0, smoothedSheetCenter.z),
+            new Vector3(lastTextureCenter.x, 0, lastTextureCenter.z)
+        );
         
-        // Rebuild if smoothed position changed significantly (for smooth movement)
-        // Use smaller threshold for smooth updates
-        float smoothUpdateThreshold = MiasmaManager.Instance.tileSize * 0.1f;  // Update for small movements
-        bool smoothedMoved = Vector3.Distance(smoothedSheetCenter, new Vector3(player.position.x, renderHeight, player.position.z)) > smoothUpdateThreshold;
-
-        if (boundsChanged || playerMoved || smoothedMoved || needsRebuild)
+        if (distanceFromTextureCenter > textureRecenteringThreshold)
         {
-            lastMinX = minX; lastMaxX = maxX;
-            lastMinZ = minZ; lastMaxZ = maxZ;
-            lastPlayerPos = player.position;
-            needsRebuild = true;
+            // Re-center texture and do full refresh
+            lastTextureCenter = smoothedSheetCenter;
+            needsFullRefresh = true;
         }
 
-        if (needsRebuild)
+        // Update texture coordinate mapping based on smoothed position
+        UpdateTextureMapping();
+
+        // Update texture if needed
+        if (needsFullRefresh)
         {
-            RebuildMesh();
-            needsRebuild = false;
+            RefreshFullTexture();
+            needsFullRefresh = false;
+            pendingUpdates.Clear();
+        }
+        else if (pendingUpdates.Count > 0)
+        {
+            UpdateTextureRegions();
         }
 
-        // Draw miasma tiles
+        // Update sheet position and size
+        UpdateSheetTransform();
+
+        // Draw miasma sheet
         DrawMiasma();
     }
 
-    void RebuildMesh()
+    void UpdateTextureMapping()
     {
-        visibleMatrices.Clear();
-
-        if (MiasmaManager.Instance == null || mainCamera == null || player == null) return;
-
-        float tileSize = MiasmaManager.Instance.tileSize;
-        HashSet<Vector2Int> clearedSet = new HashSet<Vector2Int>(MiasmaManager.Instance.GetClearedTiles());
-
-        // Calculate camera-aligned rectangle (covers viewport + extra)
-        float viewW = mainCamera.orthographicSize * 2f * mainCamera.aspect;
-        float viewH = mainCamera.orthographicSize * 2f;
-        float sheetW = viewW * Mathf.Max(1.0f, sizeMultiplier);  // At least cover viewport
+        // Calculate world-to-texture coordinate mapping
+        // Texture center should align with smoothedSheetCenter
+        float halfWorldSize = textureWorldSize * 0.5f;
         
-        // Expand height to account for isometric compression (30° elevation = ~15% compression)
-        // cos(30°) ≈ 0.866, so we need to expand by ~1.155 to compensate
-        float isometricCompensation = 2.0f;  // Extra padding for isometric view
-        float sheetH = viewH * Mathf.Max(1.0f, sizeMultiplier) * isometricCompensation;
+        textureScaleX = 1f / textureWorldSize;
+        textureScaleZ = 1f / textureWorldSize;
+        textureOffsetX = 0.5f - (smoothedSheetCenter.x * textureScaleX);
+        textureOffsetZ = 0.5f - (smoothedSheetCenter.z * textureScaleZ);
         
-        // Ensure sheet is large enough to prevent edge shimmering when moving
-        // Add extra padding beyond viewport
-        float extraPadding = Mathf.Max(viewW, viewH) * 0.5f;  // 50% extra padding
-        sheetW += extraPadding;
-        sheetH += extraPadding;
-
-        // Get camera's forward and right vectors (projected to XZ plane)
-        Vector3 camForward = mainCamera.transform.forward;
-        camForward.y = 0f;
-        camForward.Normalize();
-        Vector3 camRight = Vector3.Cross(Vector3.up, camForward).normalized;
-
-        // Calculate tile grid - ensure we have enough tiles to fill the sheet
-        int tilesW = Mathf.CeilToInt(sheetW / tileSize) + 1;  // +1 to ensure coverage
-        int tilesH = Mathf.CeilToInt(sheetH / tileSize) + 1;
-        
-        // Use smoothed sheet center for smooth movement
-        Vector3 sheetCenter = smoothedSheetCenter;
-        Vector3 sheetBottomLeft = sheetCenter - camRight * (sheetW * 0.5f) - camForward * (sheetH * 0.5f);
-
-        // Generate tiles in camera-aligned grid - tiles should overlap slightly to avoid gaps
-        for (int tx = 0; tx < tilesW; tx++)
+        // Update shader properties
+        if (miasmaMaterial != null)
         {
-            for (int tz = 0; tz < tilesH; tz++)
+            miasmaMaterial.SetVector("_WorldToUV", new Vector4(textureScaleX, textureScaleZ, textureOffsetX, textureOffsetZ));
+        }
+    }
+
+    void UpdateSheetTransform()
+    {
+        if (mainCamera == null) return;
+
+        // Get viewport corners in screen space (0-1)
+        Vector3[] screenCorners = new Vector3[]
+        {
+            new Vector3(0, 0, 0),           // Bottom-left
+            new Vector3(1, 0, 0),           // Bottom-right
+            new Vector3(1, 1, 0),           // Top-right
+            new Vector3(0, 1, 0)            // Top-left
+        };
+        
+        // Convert to world space at miasma height
+        Vector3[] worldCorners = new Vector3[4];
+        Plane groundPlane = new Plane(Vector3.up, new Vector3(0, renderHeight, 0));
+        
+        for (int i = 0; i < 4; i++)
+        {
+            Ray ray = mainCamera.ScreenPointToRay(new Vector3(
+                screenCorners[i].x * Screen.width,
+                screenCorners[i].y * Screen.height,
+                0
+            ));
+            
+            float enter;
+            if (groundPlane.Raycast(ray, out enter))
             {
-                // Position in camera-aligned space (tiles edge-to-edge)
-                Vector3 localPos = camRight * (tx * tileSize) + camForward * (tz * tileSize);
-                Vector3 worldPos = sheetBottomLeft + localPos + new Vector3(tileSize * 0.5f, 0f, tileSize * 0.5f);
-
-                // Check if this world position's tile is cleared
-                Vector2Int tile = MiasmaManager.Instance.WorldToTile(worldPos);
-                
-                // Skip cleared tiles (no miasma there)
-                if (clearedSet.Contains(tile)) continue;
-
-                // Create matrix - tiles overlap to eliminate visible gaps
-                // Larger overlap for smoother appearance and to prevent edge shimmering
-                float scale = tileSize * 1.6f;  // Increased from 1.5f for better coverage
-                Matrix4x4 matrix = Matrix4x4.TRS(worldPos, Quaternion.identity, new Vector3(scale, 1f, scale));
-                visibleMatrices.Add(matrix);
+                worldCorners[i] = ray.GetPoint(enter);
+            }
+            else
+            {
+                // Fallback: use camera's forward projection
+                worldCorners[i] = mainCamera.transform.position + mainCamera.transform.forward * 10f;
+                worldCorners[i].y = renderHeight;
             }
         }
+        
+        // Calculate axis-aligned bounding box of world corners
+        Vector3 min = worldCorners[0];
+        Vector3 max = worldCorners[0];
+        for (int i = 1; i < 4; i++)
+        {
+            min.x = Mathf.Min(min.x, worldCorners[i].x);
+            min.z = Mathf.Min(min.z, worldCorners[i].z);
+            max.x = Mathf.Max(max.x, worldCorners[i].x);
+            max.z = Mathf.Max(max.z, worldCorners[i].z);
+        }
+        
+        // Add buffer for smooth edges
+        float width = max.x - min.x;
+        float height = max.z - min.z;
+        float buffer = Mathf.Max(width, height) * (sizeMultiplier - 1f) * 0.5f;
+        min.x -= buffer;
+        min.z -= buffer;
+        max.x += buffer;
+        max.z += buffer;
+        
+        // Calculate final center and size
+        Vector3 center = (min + max) * 0.5f;
+        center.y = renderHeight;
+        width = max.x - min.x;
+        height = max.z - min.z;
+        
+        // Position and scale sheet
+        transform.position = center;
+        transform.localScale = new Vector3(width, 1f, height);
+        transform.rotation = Quaternion.identity;  // Flat on ground
+    }
+
+    void RefreshFullTexture()
+    {
+        if (MiasmaManager.Instance == null || updateTexture == null) return;
+
+        // Clear texture (all black = all fog)
+        Color32[] pixels = new Color32[textureResolution * textureResolution];
+        for (int i = 0; i < pixels.Length; i++)
+        {
+            pixels[i] = new Color32(0, 0, 0, 255);  // Black = fog present
+        }
+
+        // Mark cleared tiles as white (no fog) - draw circles for proper clearing
+        HashSet<Vector2Int> clearedSet = new HashSet<Vector2Int>(MiasmaManager.Instance.GetClearedTiles());
+        float tileSize = MiasmaManager.Instance.tileSize;
+        Color32 clearedColor = new Color32(255, 255, 255, 255);  // White = cleared
+        
+        foreach (var tile in clearedSet)
+        {
+            Vector3 worldPos = MiasmaManager.Instance.TileToWorld(tile);
+            if (WorldToTextureCoords(worldPos, out int centerX, out int centerY))
+            {
+                // Calculate radius in texture pixels
+                // Use configurable multiplier to ensure complete coverage
+                float radiusInWorld = tileSize * 0.5f * clearingRadiusMultiplier;
+                float radiusInTex = radiusInWorld * textureScaleX * textureResolution;
+                int radiusPixels = Mathf.CeilToInt(radiusInTex) + 1;  // Safety margin
+                
+                // Draw circle in texture
+                int minX = Mathf.Max(0, centerX - radiusPixels);
+                int maxX = Mathf.Min(textureResolution - 1, centerX + radiusPixels);
+                int minY = Mathf.Max(0, centerY - radiusPixels);
+                int maxY = Mathf.Min(textureResolution - 1, centerY + radiusPixels);
+                
+                float radiusSq = radiusInTex * radiusInTex;
+                
+                for (int y = minY; y <= maxY; y++)
+                {
+                    for (int x = minX; x <= maxX; x++)
+                    {
+                        float dx = (x - centerX);
+                        float dy = (y - centerY);
+                        float distSq = dx * dx + dy * dy;
+                        
+                        if (distSq <= radiusSq)
+                        {
+                            int index = y * textureResolution + x;
+                            pixels[index] = clearedColor;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply to texture
+        updateTexture.SetPixels32(pixels);
+        updateTexture.Apply(false);
+        
+        // Copy to RenderTexture
+        Graphics.Blit(updateTexture, clearedMaskTexture);
+        
+        pendingUpdates.Clear();
+    }
+
+    void UpdateTextureRegions()
+    {
+        if (MiasmaManager.Instance == null || updateTexture == null) return;
+
+        // Update only changed tiles - draw circles for proper clearing
+        HashSet<Vector2Int> clearedSet = new HashSet<Vector2Int>(MiasmaManager.Instance.GetClearedTiles());
+        List<Vector2Int> toUpdate = new List<Vector2Int>(pendingUpdates);
+        pendingUpdates.Clear();
+
+        float tileSize = MiasmaManager.Instance.tileSize;
+        
+        foreach (var tile in toUpdate)
+        {
+            Vector3 worldPos = MiasmaManager.Instance.TileToWorld(tile);
+            if (WorldToTextureCoords(worldPos, out int centerX, out int centerY))
+            {
+                bool isCleared = clearedSet.Contains(tile);
+                
+                // Calculate radius in texture pixels
+                // Use configurable multiplier to ensure complete coverage
+                // This ensures circles overlap and cover the full cleared area from beams
+                float radiusInWorld = tileSize * 0.5f * clearingRadiusMultiplier;
+                float radiusInTex = radiusInWorld * textureScaleX * textureResolution;
+                int radiusPixels = Mathf.CeilToInt(radiusInTex) + 1;  // Safety margin
+                
+                // Draw circle in texture
+                int minX = Mathf.Max(0, centerX - radiusPixels);
+                int maxX = Mathf.Min(textureResolution - 1, centerX + radiusPixels);
+                int minY = Mathf.Max(0, centerY - radiusPixels);
+                int maxY = Mathf.Min(textureResolution - 1, centerY + radiusPixels);
+                
+                Color32 color = isCleared 
+                    ? new Color32(255, 255, 255, 255)  // White = cleared
+                    : new Color32(0, 0, 0, 255);        // Black = fog
+                
+                float radiusSq = radiusInTex * radiusInTex;
+                
+                for (int y = minY; y <= maxY; y++)
+                {
+                    for (int x = minX; x <= maxX; x++)
+                    {
+                        float dx = (x - centerX);
+                        float dy = (y - centerY);
+                        float distSq = dx * dx + dy * dy;
+                        
+                        if (distSq <= radiusSq)
+                        {
+                            updateTexture.SetPixel(x, y, color);
+                        }
+                    }
+                }
+            }
+        }
+
+        updateTexture.Apply(false);
+        Graphics.Blit(updateTexture, clearedMaskTexture);
+    }
+
+    bool WorldToTextureCoords(Vector3 worldPos, out int texX, out int texY)
+    {
+        // Convert world position to texture UV, then to pixel coordinates
+        float u = worldPos.x * textureScaleX + textureOffsetX;
+        float v = worldPos.z * textureScaleZ + textureOffsetZ;
+        
+        texX = Mathf.FloorToInt(u * textureResolution);
+        texY = Mathf.FloorToInt(v * textureResolution);
+        
+        return true;
     }
 
     void DrawMiasma()
     {
-        if (visibleMatrices.Count == 0) return;
+        if (sheetMesh == null || miasmaMaterial == null) return;
 
-        // Draw in batches (Unity limit is 1023 per call)
-        int drawn = 0;
-        while (drawn < visibleMatrices.Count)
-        {
-            int batchSize = Mathf.Min(maxTilesPerBatch, visibleMatrices.Count - drawn);
-            
-            for (int i = 0; i < batchSize; i++)
-            {
-                matrices[i] = visibleMatrices[drawn + i];
-            }
-
-            Graphics.DrawMeshInstanced(tileMesh, 0, miasmaMaterial, matrices, batchSize, propertyBlock);
-            drawn += batchSize;
-        }
+        Graphics.DrawMesh(sheetMesh, transform.localToWorldMatrix, miasmaMaterial, 0, null, 0, propertyBlock);
     }
 
-    void CreateTileMesh()
+    void CreateSheetMesh()
     {
-        // Simple quad (1x1, will be scaled by matrix)
-        tileMesh = new Mesh();
+        // Simple quad covering -1 to +1 in X and Z
+        sheetMesh = new Mesh();
+        sheetMesh.name = "MiasmaSheet";
 
         Vector3[] vertices = new Vector3[]
         {
-            new Vector3(-0.5f, 0f, -0.5f),
-            new Vector3(0.5f, 0f, -0.5f),
-            new Vector3(0.5f, 0f, 0.5f),
-            new Vector3(-0.5f, 0f, 0.5f)
+            new Vector3(-0.5f, 0f, -0.5f),  // Bottom-left
+            new Vector3(0.5f, 0f, -0.5f),   // Bottom-right
+            new Vector3(0.5f, 0f, 0.5f),    // Top-right
+            new Vector3(-0.5f, 0f, 0.5f)    // Top-left
         };
 
-        int[] triangles = new int[] { 0, 2, 1, 0, 3, 2 };
+        int[] triangles = new int[] 
+        { 
+            0, 2, 1,  // First triangle
+            0, 3, 2   // Second triangle
+        };
 
         Vector2[] uvs = new Vector2[]
         {
@@ -244,20 +428,49 @@ public class MiasmaRenderer : MonoBehaviour
             new Vector2(0, 1)
         };
 
-        tileMesh.vertices = vertices;
-        tileMesh.triangles = triangles;
-        tileMesh.uv = uvs;
-        tileMesh.RecalculateNormals();
+        sheetMesh.vertices = vertices;
+        sheetMesh.triangles = triangles;
+        sheetMesh.uv = uvs;
+        sheetMesh.RecalculateNormals();
+    }
+
+    void CreateTexture()
+    {
+        // Create RenderTexture for GPU sampling
+        clearedMaskTexture = new RenderTexture(textureResolution, textureResolution, 0, RenderTextureFormat.R8);
+        clearedMaskTexture.filterMode = FilterMode.Bilinear;
+        clearedMaskTexture.wrapMode = TextureWrapMode.Clamp;
+        clearedMaskTexture.Create();
+
+        // Create CPU-side texture for updates
+        updateTexture = new Texture2D(textureResolution, textureResolution, TextureFormat.R8, false);
+        updateTexture.filterMode = FilterMode.Bilinear;
+        updateTexture.wrapMode = TextureWrapMode.Clamp;
+
+        // Initialize to all black (all fog)
+        Color32[] pixels = new Color32[textureResolution * textureResolution];
+        for (int i = 0; i < pixels.Length; i++)
+        {
+            pixels[i] = new Color32(0, 0, 0, 255);
+        }
+        updateTexture.SetPixels32(pixels);
+        updateTexture.Apply(false);
+
+        // Copy initial state to RenderTexture
+        Graphics.Blit(updateTexture, clearedMaskTexture);
     }
 
     void CreateMaterial()
     {
-        // Use custom instanced shader
-        Shader shader = Shader.Find("Custom/UnlitInstanced");
-        if (shader == null) shader = Shader.Find("Legacy Shaders/Diffuse");
-        
+        Shader shader = Shader.Find("Custom/MiasmaSheet");
+        if (shader == null)
+        {
+            Debug.LogError("MiasmaSheet shader not found! Using fallback.");
+            shader = Shader.Find("Sprites/Default");
+        }
+
         miasmaMaterial = new Material(shader);
         miasmaMaterial.SetColor("_Color", miasmaColor);
-        miasmaMaterial.enableInstancing = true;
+        miasmaMaterial.SetTexture("_ClearedMask", clearedMaskTexture);
     }
 }

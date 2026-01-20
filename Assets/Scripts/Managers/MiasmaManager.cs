@@ -59,6 +59,7 @@ public class MiasmaManager : MonoBehaviour
 
     // Events
     public event Action OnClearedChanged;
+    public event Action<HashSet<Vector2Int>> OnTilesChanged;  // Passes set of changed tiles
 
     // Stats
     public int ClearedCount => clearedTiles.Count;
@@ -175,6 +176,7 @@ public class MiasmaManager : MonoBehaviour
         int tileRadius = Mathf.CeilToInt(radius / tileSize);
 
         Vector2Int centerTile = WorldToTile(worldPos);
+        HashSet<Vector2Int> changedTiles = new HashSet<Vector2Int>();
 
         for (int dx = -tileRadius; dx <= tileRadius; dx++)
         {
@@ -189,6 +191,7 @@ public class MiasmaManager : MonoBehaviour
 
                 if (distSq <= radiusSq)
                 {
+                    changedTiles.Add(tile);  // Track all tiles in radius
                     if (!clearedTiles.ContainsKey(tile))
                     {
                         clearedTiles[tile] = Time.time;
@@ -202,6 +205,7 @@ public class MiasmaManager : MonoBehaviour
         if (cleared > 0)
         {
             OnClearedChanged?.Invoke();
+            OnTilesChanged?.Invoke(changedTiles);
         }
 
         return cleared;
@@ -275,6 +279,34 @@ public class MiasmaManager : MonoBehaviour
         if (cleared > 0)
         {
             OnClearedChanged?.Invoke();
+            // Collect changed tiles for efficient updates
+            HashSet<Vector2Int> changedTiles = new HashSet<Vector2Int>();
+            for (int dx = -tileRadius; dx <= tileRadius; dx++)
+            {
+                for (int dz = -tileRadius; dz <= tileRadius; dz++)
+                {
+                    Vector2Int tile = new Vector2Int(originTile.x + dx, originTile.y + dz);
+                    Vector3 tileWorld = TileToWorld(tile);
+                    Vector3 toTile = tileWorld - origin;
+                    toTile.y = 0f;
+                    float distSq = toTile.sqrMagnitude;
+                    if (distSq <= lengthSq && toTile.magnitude > 0.001f)
+                    {
+                        toTile.Normalize();
+                        float dot = Vector3.Dot(direction, toTile);
+                        float angle = Mathf.Acos(Mathf.Clamp(dot, -1f, 1f));
+                        if (angle <= halfAngle)
+                        {
+                            changedTiles.Add(tile);
+                        }
+                    }
+                    else if (distSq <= lengthSq)
+                    {
+                        changedTiles.Add(tile);
+                    }
+                }
+            }
+            OnTilesChanged?.Invoke(changedTiles);
         }
 
         return cleared;
@@ -306,6 +338,7 @@ public class MiasmaManager : MonoBehaviour
         if (cleared > 0)
         {
             OnClearedChanged?.Invoke();
+            // Note: Laser uses ClearArea internally, so tiles are already tracked
         }
 
         return cleared;
@@ -386,17 +419,20 @@ public class MiasmaManager : MonoBehaviour
         int forgetRight = keepRight + Mathf.Max(offscreenForgetPad, offscreenRegrowPad + regrowScanPad);
         int forgetBottom = keepBottom + Mathf.Max(offscreenForgetPad, offscreenRegrowPad + regrowScanPad);
 
-        // Process regrowth with zone filtering
+        // Process regrowth with distance-based priority (smooth comet tail effect)
         int budget = currentRegrowBudget;
         List<Vector2Int> toRegrow = new List<Vector2Int>();
         List<Vector2Int> toForget = new List<Vector2Int>();
+        List<(Vector2Int tile, float distance, float age)> candidates = new List<(Vector2Int, float, float)>();
+        
         float currentTime = Time.time;
-        float chance = regrowChance * regrowSpeedFactor;
+        float baseChance = regrowChance * regrowSpeedFactor;
         int scanned = 0;
 
+        // First pass: collect eligible candidates with distance and age
         foreach (var tile in frontier)
         {
-            if (budget <= 0 || scanned >= maxRegrowScanPerFrame) break;
+            if (scanned >= maxRegrowScanPerFrame) break;
             scanned++;
 
             if (!clearedTiles.TryGetValue(tile, out float clearedTime))
@@ -426,15 +462,55 @@ public class MiasmaManager : MonoBehaviour
             }
 
             // Check delay
-            if (currentTime - clearedTime < regrowDelay) continue;
+            float age = currentTime - clearedTime;
+            if (age < regrowDelay) continue;
 
-            // Random chance
-            if (UnityEngine.Random.value < chance)
+            // Calculate distance from player (for smooth tapering)
+            Vector3 tileWorld = TileToWorld(tile);
+            float distance = Vector3.Distance(new Vector3(tileWorld.x, 0, tileWorld.z), 
+                                             new Vector3(playerPos.x, 0, playerPos.z));
+            
+            candidates.Add((tile, distance, age));
+        }
+
+        // Sort by distance (further = higher priority) and age (older = higher priority)
+        // This creates smooth tapering: furthest/oldest tiles regrow first
+        candidates.Sort((a, b) => 
+        {
+            // Primary: distance (further first)
+            int distCompare = b.distance.CompareTo(a.distance);
+            if (distCompare != 0) return distCompare;
+            // Secondary: age (older first)
+            return b.age.CompareTo(a.age);
+        });
+
+        // Second pass: process candidates with distance-based chance
+        foreach (var candidate in candidates)
+        {
+            if (budget <= 0) break;
+
+            // Distance-based regrowth chance: further from player = higher chance
+            // This creates smooth tapering effect (comet tail)
+            float keepZoneRadius = Mathf.Max(viewW, viewH) * 0.5f;  // Approximate keep zone radius
+            float distanceFactor = Mathf.Clamp01((candidate.distance - keepZoneRadius) / (keepZoneRadius * 2f));
+            
+            // Age factor: older tiles regrow faster
+            float ageFactor = Mathf.Clamp01(candidate.age / (regrowDelay * 3f));
+            
+            // Combined chance: base chance * distance factor * age factor
+            float finalChance = baseChance * (0.3f + 0.7f * distanceFactor) * (0.5f + 0.5f * ageFactor);
+
+            if (UnityEngine.Random.value < finalChance)
             {
-                toRegrow.Add(tile);
+                toRegrow.Add(candidate.tile);
                 budget--;
             }
         }
+
+        // Collect all changed tiles
+        HashSet<Vector2Int> changedTiles = new HashSet<Vector2Int>();
+        changedTiles.UnionWith(toForget);
+        changedTiles.UnionWith(toRegrow);
 
         // Apply forget (remove far-off tiles)
         foreach (var tile in toForget)
@@ -451,6 +527,7 @@ public class MiasmaManager : MonoBehaviour
         if (toRegrow.Count > 0 || toForget.Count > 0)
         {
             OnClearedChanged?.Invoke();
+            OnTilesChanged?.Invoke(changedTiles);
         }
     }
 
@@ -489,6 +566,7 @@ public class MiasmaManager : MonoBehaviour
         }
 
         // Apply removals
+        HashSet<Vector2Int> changedTiles = new HashSet<Vector2Int>(toRemove);
         foreach (var tile in toRemove)
         {
             RemoveClearedTile(tile);
@@ -497,6 +575,7 @@ public class MiasmaManager : MonoBehaviour
         if (toRemove.Count > 0)
         {
             OnClearedChanged?.Invoke();
+            OnTilesChanged?.Invoke(changedTiles);
         }
     }
 

@@ -521,8 +521,9 @@ MonoBehaviour:
   mainCamera: {fileID: 519420031}
   miasmaColor: {r: 0.5, g: 0, b: 0.7, a: 0.9}
   renderHeight: 0.01
-  sizeMultiplier: 1.2
-  maxTilesPerBatch: 1023
+  textureResolution: 512
+  textureWorldSize: 50
+  sizeMultiplier: 1
   smoothingSpeed: 8
 --- !u!4 &1731235958
 Transform:
