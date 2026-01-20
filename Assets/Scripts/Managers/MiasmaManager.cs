@@ -212,8 +212,8 @@ public class MiasmaManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Clear miasma in a cone shape (sector/pie slice)
-    /// Matches the visual: pie slice from origin to length at given angle
+    /// Clear miasma in a cone shape (flashlight beam)
+    /// Matches the visual: point at origin, cone sides, semicircle at far end
     /// </summary>
     public int ClearCone(Vector3 origin, Vector3 direction, float length, float halfAngleDeg)
     {
@@ -240,14 +240,14 @@ public class MiasmaManager : MonoBehaviour
                 toTile.y = 0f;
                 
                 float distSq = toTile.sqrMagnitude;
+                float dist = Mathf.Sqrt(distSq);
                 
                 // Check if within length
                 if (distSq > lengthSq) continue;
                 
-                // Check if within angle (cone)
-                if (toTile.magnitude < 0.001f)
+                // At origin (tip), always clear
+                if (dist < 0.001f)
                 {
-                    // At origin, always clear
                     if (!clearedTiles.ContainsKey(tile))
                     {
                         clearedTiles[tile] = Time.time;
@@ -263,7 +263,7 @@ public class MiasmaManager : MonoBehaviour
                 float dot = Vector3.Dot(direction, toTile);
                 float angle = Mathf.Acos(Mathf.Clamp(dot, -1f, 1f));
                 
-                // Check if within halfAngle
+                // Check if within cone angle (this naturally includes the semicircle at the end)
                 if (angle <= halfAngle)
                 {
                     if (!clearedTiles.ContainsKey(tile))
@@ -351,6 +351,19 @@ public class MiasmaManager : MonoBehaviour
     {
         Vector2Int tile = WorldToTile(worldPos);
         return !clearedTiles.ContainsKey(tile);
+    }
+
+    /// <summary>
+    /// Mark a specific tile as cleared (for rocks, etc.)
+    /// </summary>
+    public void MarkTileCleared(Vector2Int tile)
+    {
+        if (!clearedTiles.ContainsKey(tile))
+        {
+            clearedTiles[tile] = Time.time;
+            UpdateFrontier(tile);
+            OnClearedChanged?.Invoke();
+        }
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.Collections.Generic;
 
 /// <summary>
 /// Renders the beam visual and triggers clearing.
@@ -202,31 +203,68 @@ public class BeamRenderer : MonoBehaviour
         Mesh mesh = new Mesh();
         float halfAngle = halfAngleDeg * Mathf.Deg2Rad;
 
-        // Center vertex at origin
-        Vector3[] vertices = new Vector3[segments + 2];  // +1 for center, +1 for tip
-        int[] triangles = new int[segments * 3];
-
-        vertices[0] = Vector3.zero;  // Center
-
-        // Create arc at distance 'length'
-        for (int i = 0; i <= segments; i++)
+        // Ice cream cone / flashlight shape:
+        // - Point at origin (tip)
+        // - Two straight edges extending outward
+        // - Semicircle at the far end
+        
+        // Calculate width at far end (semicircle diameter)
+        float endWidth = Mathf.Tan(halfAngle) * length * 2f;
+        float endRadius = endWidth * 0.5f;
+        
+        // Number of vertices: 1 tip + semicircle segments + 2 edge points
+        int semicircleSegs = segments / 2;  // Half circle
+        Vector3[] vertices = new Vector3[1 + semicircleSegs + 1 + 2];  // tip + semicircle + 2 edge points
+        List<int> triangles = new List<int>();
+        
+        int vertexIndex = 0;
+        
+        // Tip vertex at origin
+        vertices[vertexIndex++] = Vector3.zero;
+        int tipIndex = 0;
+        
+        // Left edge point (at far end)
+        float leftAngle = -halfAngle;
+        Vector3 leftEdge = new Vector3(Mathf.Sin(leftAngle) * length, 0f, Mathf.Cos(leftAngle) * length);
+        vertices[vertexIndex++] = leftEdge;
+        int leftEdgeIndex = vertexIndex - 1;
+        
+        // Semicircle at far end (from left to right)
+        for (int i = 0; i <= semicircleSegs; i++)
         {
-            float angle = -halfAngle + (halfAngle * 2f * i / segments);
+            float angle = leftAngle + (halfAngle * 2f * i / semicircleSegs);
             float x = Mathf.Sin(angle) * length;
             float z = Mathf.Cos(angle) * length;
-            vertices[i + 1] = new Vector3(x, 0f, z);
+            vertices[vertexIndex++] = new Vector3(x, 0f, z);
         }
-
-        // Create triangles (pie slice)
-        for (int i = 0; i < segments; i++)
+        
+        // Right edge point (at far end)
+        float rightAngle = halfAngle;
+        Vector3 rightEdge = new Vector3(Mathf.Sin(rightAngle) * length, 0f, Mathf.Cos(rightAngle) * length);
+        vertices[vertexIndex++] = rightEdge;
+        int rightEdgeIndex = vertexIndex - 1;
+        
+        // Create triangles:
+        // 1. Left edge triangle (tip -> left edge -> first semicircle point)
+        triangles.Add(tipIndex);
+        triangles.Add(leftEdgeIndex);
+        triangles.Add(leftEdgeIndex + 1);
+        
+        // 2. Semicircle triangles (tip -> semicircle points)
+        for (int i = 0; i < semicircleSegs; i++)
         {
-            triangles[i * 3] = 0;  // Center
-            triangles[i * 3 + 1] = i + 1;
-            triangles[i * 3 + 2] = i + 2;
+            triangles.Add(tipIndex);
+            triangles.Add(leftEdgeIndex + 1 + i);
+            triangles.Add(leftEdgeIndex + 1 + i + 1);
         }
+        
+        // 3. Right edge triangle (tip -> last semicircle point -> right edge)
+        triangles.Add(tipIndex);
+        triangles.Add(rightEdgeIndex - 1);
+        triangles.Add(rightEdgeIndex);
 
         mesh.vertices = vertices;
-        mesh.triangles = triangles;
+        mesh.triangles = triangles.ToArray();
         mesh.RecalculateNormals();
 
         return mesh;
