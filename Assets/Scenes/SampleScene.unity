@@ -465,12 +465,12 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   currentMode: 1
-  bubbleMinRadius: 3
-  bubbleMaxRadius: 8
-  coneLength: 14
-  coneHalfAngle: 32
-  laserLength: 32
-  laserThickness: 0.75
+  bubbleMinRadius: 2
+  bubbleMaxRadius: 4
+  coneLength: 8
+  coneHalfAngle: 16
+  laserLength: 10
+  laserThickness: 0.25
 --- !u!4 &1499399073
 Transform:
   m_ObjectHideFlags: 0
