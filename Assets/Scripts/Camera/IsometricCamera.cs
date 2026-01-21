@@ -53,12 +53,16 @@ public class IsometricCamera : MonoBehaviour
     {
         if (target != null)
         {
-            UpdateCameraPosition(target.position);
+            // Center camera on player sprite (sprite is at localPosition (0, 0.05, 0) relative to Derelict)
+            // So we need to account for that offset to center the sprite on screen
+            Vector3 spriteWorldPos = target.position + new Vector3(0f, 0.05f, 0f);
+            UpdateCameraPosition(spriteWorldPos);
         }
     }
 
     void UpdateCameraPosition(Vector3 targetPos)
     {
+        // Position camera so target appears at center of screen
         Vector3 offset = transform.rotation * Vector3.back * distance;
         transform.position = targetPos + offset;
     }

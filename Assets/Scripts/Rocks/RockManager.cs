@@ -11,15 +11,15 @@ public class RockManager : MonoBehaviour
 
     [Header("Generation Settings")]
     [Tooltip("Number of rock formations to generate")]
-    public int rockFormationCount = 10;
+    public int rockFormationCount = 150;  // Much denser
     [Tooltip("Percentage of rocks that are tall (0-1)")]
     [Range(0f, 1f)]
-    public float tallRockPercent = 0.25f;  // 25% tall
-    [Tooltip("Radius around player spawn to generate rocks (spread out more)")]
-    public float generationRadius = 25f;  // Increased for more spread
+    public float tallRockPercent = 0.05f;  // 5% tall (even fewer tall rocks)
+    [Tooltip("Ground size for even distribution")]
+    public float groundSize = 200f;  // Match GridGround size
     
     [Header("Rock Settings")]
-    public float voxelSize = 1.0f;  // 4x miasma tile size
+    public float voxelSize = 0.25f;  // Same as miasma tile size (1/4th of original)
     public float tallThreshold = 0.05f;
     public Color rockColor = new Color(0.6f, 0.4f, 0.2f);  // Brown
 
@@ -38,9 +38,8 @@ public class RockManager : MonoBehaviour
 
     void Start()
     {
-        // Generate rocks near player spawn
-        Vector3 playerSpawn = GetPlayerSpawnPosition();
-        GenerateRocks(playerSpawn);
+        // Generate rocks evenly spread across the ground
+        GenerateRocksEvenly();
         
         // Integrate tall rocks with miasma
         UpdateMiasmaForRocks();
@@ -57,9 +56,9 @@ public class RockManager : MonoBehaviour
     }
 
     /// <summary>
-    /// Generate rock formations near the given center position.
+    /// Generate rock formations evenly spread across the ground.
     /// </summary>
-    public void GenerateRocks(Vector3 center)
+    public void GenerateRocksEvenly()
     {
         // Clear existing rocks
         foreach (var rock in allRocks)
@@ -69,13 +68,56 @@ public class RockManager : MonoBehaviour
         allRocks.Clear();
         tallRocks.Clear();
         
-        // Generate clumps
-        List<Rock> newRocks = RockClumpGenerator.GenerateClumps(
-            center,
-            generationRadius,
-            rockFormationCount,
-            tallRockPercent
-        );
+        // Generate rocks evenly distributed across the ground plane - MUCH denser
+        float halfGround = groundSize * 0.5f;
+        
+        // Use Poisson-like distribution for more natural spread
+        List<Rock> newRocks = new List<Rock>();
+        List<Vector3> placedPositions = new List<Vector3>();
+        float minDistance = 8f;  // Minimum distance between formations
+        
+        int attempts = 0;
+        int maxAttempts = rockFormationCount * 50;  // Try many times to place
+        
+        for (int i = 0; i < rockFormationCount && attempts < maxAttempts; attempts++)
+        {
+            // Random position
+            Vector3 position = new Vector3(
+                Random.Range(-halfGround, halfGround),
+                0f,
+                Random.Range(-halfGround, halfGround)
+            );
+            
+            // Check if too close to existing formations
+            bool tooClose = false;
+            foreach (var placed in placedPositions)
+            {
+                if (Vector3.Distance(new Vector3(position.x, 0, position.z), 
+                                   new Vector3(placed.x, 0, placed.z)) < minDistance)
+                {
+                    tooClose = true;
+                    break;
+                }
+            }
+            
+            if (tooClose) continue;
+            
+            placedPositions.Add(position);
+            
+            // Generate a single large formation at this position
+            GameObject rockObj = new GameObject($"RockFormation_{i}");
+            Rock rock = rockObj.AddComponent<Rock>();
+            
+            // Large formations: 200-800 voxels
+            int voxelCount = Random.Range(200, 801);
+            
+            // Determine if this formation should be tall (5% chance)
+            bool forceTall = Random.value < tallRockPercent;
+            
+            // Generate rock shape
+            rock.GenerateRock(voxelCount, position, forceTall);
+            newRocks.Add(rock);
+        }
         
         allRocks.AddRange(newRocks);
         
@@ -88,7 +130,7 @@ public class RockManager : MonoBehaviour
             }
         }
         
-        Debug.Log($"Generated {allRocks.Count} rocks ({tallRocks.Count} tall)");
+        Debug.Log($"Generated {allRocks.Count} rocks ({tallRocks.Count} tall) evenly across {groundSize}x{groundSize} ground");
     }
 
     /// <summary>
@@ -108,19 +150,10 @@ public class RockManager : MonoBehaviour
             {
                 if (voxel.isTall)
                 {
-                    // Each rock voxel is 4x miasma tile size (1.0 vs 0.25)
-                    // So we need to clear 4 tiles (2x2 grid) for each tall voxel
+                    // Each rock voxel is same size as miasma tile (0.25 vs 0.25)
+                    // So we need to clear 1 tile for each tall voxel
                     Vector2Int centerTile = MiasmaManager.Instance.WorldToTile(voxel.position);
-                    
-                    // Clear 2x2 grid of tiles (4 tiles total) - exact pixel clearing
-                    for (int dx = 0; dx < 2; dx++)
-                    {
-                        for (int dz = 0; dz < 2; dz++)
-                        {
-                            Vector2Int tile = new Vector2Int(centerTile.x + dx, centerTile.y + dz);
-                            tilesToClear.Add(tile);
-                        }
-                    }
+                    tilesToClear.Add(centerTile);
                 }
             }
         }

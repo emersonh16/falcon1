@@ -65,28 +65,58 @@ public class BeamRenderer : MonoBehaviour
 
         var mode = BeamManager.Instance.currentMode;
         Vector3 playerPos = transform.parent != null ? transform.parent.position : transform.position;
+        
+        // Find the actual player sprite GameObject to get its EXACT world position
+        Vector3 playerSpriteWorldPos = playerPos;
+        if (transform.parent != null)
+        {
+            // Look for CreatePlayerSprite component in children (the sprite GameObject)
+            CreatePlayerSprite sprite = transform.parent.GetComponentInChildren<CreatePlayerSprite>();
+            if (sprite != null && sprite.transform != null)
+            {
+                // Use the sprite's actual world position
+                playerSpriteWorldPos = sprite.transform.position;
+            }
+            else
+            {
+                // Fallback: sprite is at localPosition (0, 0.05, 0) relative to Derelict
+                playerSpriteWorldPos = playerPos + new Vector3(0f, 0.05f, 0f);
+            }
+        }
 
-        // Get mouse world position on ground plane
+        // Get mouse world position on the same plane as player sprite (Y=0.05)
         Vector3 mouseWorldPos = GetMouseWorldPosition();
-        Vector3 direction = (mouseWorldPos - playerPos).normalized;
+        mouseWorldPos.y = playerSpriteWorldPos.y;  // Match sprite Y position
+        
+        // Calculate direction from player sprite center to mouse
+        Vector3 direction = (mouseWorldPos - playerSpriteWorldPos);
+        direction.y = 0f;  // Keep on XZ plane (horizontal only)
+        if (direction.magnitude > 0.001f)
+        {
+            direction.Normalize();
+        }
+        else
+        {
+            direction = Vector3.forward;  // Default forward if mouse is exactly on player
+        }
         float angle = Mathf.Atan2(direction.x, direction.z) * Mathf.Rad2Deg;
 
         // Update visual if changed
         if (mode != lastMode)
         {
-            UpdateVisual(playerPos, direction, angle);
+            UpdateVisual(playerSpriteWorldPos, direction, angle);
             lastMode = mode;
         }
         else if (mode == BeamManager.BeamMode.Cone || mode == BeamManager.BeamMode.Laser)
         {
             // Update visual every frame for cone/laser (they rotate with mouse)
-            UpdateVisual(playerPos, direction, angle);
+            UpdateVisual(playerSpriteWorldPos, direction, angle);
         }
 
-        // Keep beam centered on parent (Derelict), between ground and miasma
+        // Position beam transform at EXACT player sprite position
         if (transform.parent != null)
         {
-            transform.position = transform.parent.position + new Vector3(0f, 0.005f, 0f);
+            transform.position = playerSpriteWorldPos;
             
             // Rotate to face mouse for cone/laser
             if (mode == BeamManager.BeamMode.Cone || mode == BeamManager.BeamMode.Laser)
@@ -100,20 +130,21 @@ public class BeamRenderer : MonoBehaviour
         }
 
         // Fire beam every frame (for continuous clearing)
+        // Use EXACTLY the same position as the visual (playerSpriteWorldPos - center of player sprite)
         if (mode != BeamManager.BeamMode.Off)
         {
             if (mode == BeamManager.BeamMode.BubbleMin || mode == BeamManager.BeamMode.BubbleMax)
             {
                 float radius = BeamManager.Instance.GetCurrentRadius();
-                BeamManager.Instance.FireBeam(playerPos, radius);
+                BeamManager.Instance.FireBeam(playerSpriteWorldPos, radius);
             }
             else if (mode == BeamManager.BeamMode.Cone)
             {
-                BeamManager.Instance.FireBeamCone(playerPos, direction);
+                BeamManager.Instance.FireBeamCone(playerSpriteWorldPos, direction);
             }
             else if (mode == BeamManager.BeamMode.Laser)
             {
-                BeamManager.Instance.FireBeamLaser(playerPos, direction);
+                BeamManager.Instance.FireBeamLaser(playerSpriteWorldPos, direction);
             }
         }
     }
@@ -122,16 +153,20 @@ public class BeamRenderer : MonoBehaviour
     {
         if (mainCamera == null) return Vector3.zero;
 
+        // Get player sprite position for plane height
+        Vector3 playerPos = transform.parent != null ? transform.parent.position : transform.position;
+        Vector3 spritePos = playerPos + new Vector3(0f, 0.05f, 0f);
+
         Ray ray = mainCamera.ScreenPointToRay(Input.mousePosition);
-        Plane groundPlane = new Plane(Vector3.up, 0f);  // Ground at Y=0
+        Plane spritePlane = new Plane(Vector3.up, spritePos.y);  // Plane at sprite Y position
         
-        if (groundPlane.Raycast(ray, out float distance))
+        if (spritePlane.Raycast(ray, out float distance))
         {
             return ray.GetPoint(distance);
         }
         
-        // Fallback: project mouse to ground
-        return new Vector3(ray.origin.x, 0f, ray.origin.z);
+        // Fallback: project mouse to sprite plane
+        return spritePos;
     }
 
     void OnModeChanged(BeamManager.BeamMode newMode)

@@ -11,11 +11,11 @@ public static class RockClumpGenerator
         List<Rock> allRocks = new List<Rock>();
         
         // Spread rocks more randomly across the area (not just in circle)
-        // Use uniform distribution for better spread
+        // Use uniform distribution for better spread - even more spread out
         for (int i = 0; i < clumpCount; i++)
         {
             // More random distribution - use square area instead of circle
-            // This spreads rocks out more evenly
+            // This spreads rocks out more evenly - use full radius range
             float x = center.x + Random.Range(-radius, radius);
             float z = center.z + Random.Range(-radius, radius);
             Vector3 clumpCenter = new Vector3(x, 0f, z);
@@ -28,13 +28,16 @@ public static class RockClumpGenerator
         return allRocks;
     }
 
-    static List<Rock> GenerateClump(Vector3 center, float tallRockPercent)
+    public static List<Rock> GenerateClump(Vector3 center, float tallRockPercent, int rockCount = -1)
     {
         List<Rock> rocks = new List<Rock>();
         
-        // Smaller clumps, more spread out: 2-5 rocks per clump
-        int rockCount = Random.Range(2, 6);
-        float clumpRadius = 1.5f;  // Smaller radius for tighter clumps
+        // Use provided rock count or random 2-5 rocks per clump
+        if (rockCount < 0)
+        {
+            rockCount = Random.Range(2, 6);
+        }
+        float clumpRadius = 0.5f;  // Smaller radius for tighter clumps (scaled down for smaller voxels)
         
         // Determine which rocks will be tall (20-30% of total)
         int tallRockCount = Mathf.RoundToInt(rockCount * tallRockPercent);
@@ -60,8 +63,8 @@ public static class RockClumpGenerator
             GameObject rockObj = new GameObject($"Rock_{i}");
             Rock rock = rockObj.AddComponent<Rock>();
             
-            // More voxels for mountain-like rocks (5-20 voxels per rock)
-            int voxelCount = Random.Range(5, 21);
+            // Large formations: 200-800 voxels per rock (mountain/boulder ranges)
+            int voxelCount = Random.Range(200, 801);
             
             // Determine if this rock should be tall
             bool forceTall = tallRockIndices.Contains(i);
