@@ -14,6 +14,8 @@ public class Rock : MonoBehaviour
     public float tallThreshold = 0.05f;  // Height above which voxels are "tall"
     public Color rockColor = new Color(0.6f, 0.4f, 0.2f);  // Brown
     
+    private Color lastRockColor;  // Track color changes
+    
     private List<RockVoxel> voxels = new List<RockVoxel>();
     private List<RockVoxel> shortVoxels = new List<RockVoxel>();
     private List<RockVoxel> tallVoxels = new List<RockVoxel>();
@@ -69,8 +71,25 @@ public class Rock : MonoBehaviour
         meshRenderer.sortingOrder = -1;  // Below miasma
         tallMeshRenderer.sortingOrder = 1;  // Above miasma
         
-        // Debug: Log render queues
-        Debug.Log($"Short rock render queue: {shortRockMaterial.renderQueue}, Tall rock render queue: {tallRockMaterial.renderQueue}");
+        // Track color for updates
+        lastRockColor = rockColor;
+    }
+    
+    void Update()
+    {
+        // Update material color if rockColor changed in inspector
+        if (rockColor != lastRockColor)
+        {
+            if (shortRockMaterial != null)
+            {
+                shortRockMaterial.color = rockColor;
+            }
+            if (tallRockMaterial != null)
+            {
+                tallRockMaterial.color = rockColor;
+            }
+            lastRockColor = rockColor;
+        }
     }
 
     /// <summary>
@@ -330,10 +349,9 @@ public class Rock : MonoBehaviour
         
         foreach (var voxel in shortVoxels)
         {
-            // Position short rocks BELOW miasma (Y=0.01) so depth sorting puts them behind miasma
-            // All short voxels should be at Y <= 0.005 (well below miasma at 0.01)
+            // Position short rocks BELOW miasma (Y=0.01) - force them to ground level or below
             Vector3 voxelPos = voxel.position;
-            voxelPos.y = Mathf.Min(voxelPos.y, 0.005f);  // Force below miasma
+            voxelPos.y = 0f;  // Force to ground level (below miasma at Y=0.01)
             CreateIsometricRectangle(voxelPos, voxelSize, voxelWidth, voxelHeight, shortVertices, shortTriangles);
         }
         
@@ -363,15 +381,13 @@ public class Rock : MonoBehaviour
         
         foreach (var voxel in tallVoxels)
         {
-            // Position tall rocks ABOVE miasma (Y=0.01) so depth sorting puts them in front
-            // Only the parts that are tall (above threshold) should be above miasma
+            // Position tall rocks ABOVE miasma (Y=0.01) - ensure they're above miasma height
             Vector3 voxelPos = voxel.position;
-            // If this voxel is below miasma height, move it above
-            if (voxelPos.y <= 0.01f)
+            // Force tall voxels to be above miasma
+            if (voxelPos.y < 0.02f)
             {
-                voxelPos.y = 0.015f;  // Above miasma at Y=0.01
+                voxelPos.y = 0.02f;  // Above miasma at Y=0.01
             }
-            // If already above, keep it there
             CreateIsometricRectangle(voxelPos, voxelSize, voxelWidth, voxelHeight, tallVertices, tallTriangles);
         }
         
